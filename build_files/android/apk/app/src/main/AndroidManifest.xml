@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
      SPDX-License-Identifier: GPL-2.0-or-later -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.kronos3d.app"
-    android:versionCode="5030001"
-    android:versionName="5.3.0 Alpha">
+<!-- No package attribute: AGP 9 ignores it and derives the identity from
+     applicationId/namespace in app/build.gradle instead. Keeping it only draws a
+     warning saying the value is ignored. versionCode/versionName likewise live in
+     the build file now, where -PblenderVersionName can override them. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Vulkan is used at runtime; not required so it installs on emulators too. -->
     <uses-feature android:name="android.hardware.vulkan.version"
@@ -28,7 +29,6 @@
         android:theme="@style/Theme.Kronos3D"
         android:hasCode="true"
         android:allowBackup="true"
-        android:extractNativeLibs="true"
         android:largeHeap="true">
 
         <!-- The launcher screen. It carries MAIN

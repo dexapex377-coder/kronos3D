@@ -294,7 +294,13 @@ jobs:
           # stock one has no build-tools 35.0.1 or platform 35 anyway.
           unset ANDROID_SDK_ROOT
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          # The heap is passed on the command line as well as in gradle.properties:
+          # a stale daemon started from a previous step's defaults would otherwise
+          # keep 512 MiB and spend 40 minutes in GC inside mergeExtDexRelease.
+          # --no-daemon makes this build's settings the only ones that matter.
           "${{ steps.setup-gradle.outputs.gradle-path }}/bin/gradle" assembleRelease \
+            --no-daemon \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
             -PblenderConfig=full \
             -PblenderVersionName="5.3.0 Alpha" \
             -PblenderVersionCode=5030001 \
