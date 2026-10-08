@@ -76,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.SavedStateRegistry
@@ -319,6 +320,14 @@ object ShortcutsOverlay {
             controller.performAttach()
             controller.performRestore(null)
         }
+
+        /**
+         * SavedStateRegistryOwner extends LifecycleOwner since savedstate 1.2, so this
+         * has to exist as well. Delegated rather than backed by a second registry:
+         * two independent lifecycle sources for one view is how they drift apart.
+         */
+        override val lifecycle: Lifecycle
+            get() = ProcessLifecycleOwner.get().lifecycle
 
         override val savedStateRegistry: SavedStateRegistry
             get() = controller.savedStateRegistry
