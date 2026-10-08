@@ -770,6 +770,57 @@ static GHOST_TKey convertAndroidKey(int32_t keycode)
     case AKEYCODE_NUMPAD_ENTER:
       return GHOST_kKeyNumpadEnter;
 
+    /* Function keys. The composer offers F1-F12 and without these the shortcut is
+     * stored, drawn, and then runs as a bare unknown key that matches nothing. */
+    case AKEYCODE_F1:
+    case AKEYCODE_F2:
+    case AKEYCODE_F3:
+    case AKEYCODE_F4:
+    case AKEYCODE_F5:
+    case AKEYCODE_F6:
+    case AKEYCODE_F7:
+    case AKEYCODE_F8:
+    case AKEYCODE_F9:
+    case AKEYCODE_F10:
+    case AKEYCODE_F11:
+    case AKEYCODE_F12:
+      return static_cast<GHOST_TKey>(GHOST_kKeyF1 + (keycode - AKEYCODE_F1));
+
+    /* Punctuation. GHOST spells these differently from Android: Equal not Equals,
+     * LeftBracket not BracketLeft, AccentGrave not Backtick. They are all ASCII
+     * char values, so the symbol is the enum value. */
+    case AKEYCODE_MINUS:
+      return GHOST_kKeyMinus;
+    case AKEYCODE_EQUALS:
+      return GHOST_kKeyEqual;
+    case AKEYCODE_LEFT_BRACKET:
+      return GHOST_kKeyLeftBracket;
+    case AKEYCODE_RIGHT_BRACKET:
+      return GHOST_kKeyRightBracket;
+    case AKEYCODE_BACKSLASH:
+      return GHOST_kKeyBackslash;
+    case AKEYCODE_SEMICOLON:
+      return GHOST_kKeySemicolon;
+    case AKEYCODE_APOSTROPHE:
+      return GHOST_kKeyQuote;
+    case AKEYCODE_COMMA:
+      return GHOST_kKeyComma;
+    case AKEYCODE_PERIOD:
+      return GHOST_kKeyPeriod;
+    case AKEYCODE_SLASH:
+      return GHOST_kKeySlash;
+    case AKEYCODE_GRAVE:
+      return GHOST_kKeyAccentGrave;
+
+    /* Locks, for the same reason as the modifiers: they are real keys in Blender's
+     * keymap, and dropping them made the shortcut a no-op. */
+    case AKEYCODE_CAPS_LOCK:
+      return GHOST_kKeyCapsLock;
+    case AKEYCODE_NUM_LOCK:
+      return GHOST_kKeyNumLock;
+    case AKEYCODE_SCROLL_LOCK:
+      return GHOST_kKeyScrollLock;
+
     default:
       return GHOST_kKeyUnknown;
   }

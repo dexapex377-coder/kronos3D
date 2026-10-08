@@ -1526,12 +1526,30 @@ bool WM_virtual_keyboard_rect_get(const wmWindow *win, rcti *r_rect)
 
 void WM_virtual_keyboard_toggle(wmWindowManager *wm, wmWindow *win)
 {
-  if (g_vk.open) {
-    vk_close(wm, win);
-  }
-  else {
-    vk_open(wm, win);
-  }
+  /* Disabled: the on-screen keyboard is now the Compose overlay (ShortcutsOverlay.kt),
+   * which draws its own composer and its own shortcut grid and sends combinations through
+   * nativeSendKeyCombo. This C++ one drew a second, overlapping keyboard, and it also
+   * suppressed the platform IME while it was up (interface_handlers.cc) and pushed the
+   * search popup above itself (interface_region_search.cc), so leaving it reachable meant
+   * two keyboards fighting over the same text fields.
+   *
+   * The rest of the file is deliberately kept: it is wired into four call sites
+   * (interface_handlers.cc, interface_region_search.cc, interface_region_popup.cc,
+   * wm_operators.cc) and holds the key tables, so deleting it would mean touching all of
+   * them. Only the entry point is closed.
+   *
+   * The draw handle and the overlay state are cleared too: vk_close() deliberately kept the
+   * callback alive to paint the floating ball after the board went down, so stopping only the
+   * toggle would have left the ball sitting next to the timeline, still swallowing taps. */
+  (void)wm;
+  (void)win;
+  g_vk.open = false;
+  g_vk.overlay = VirtualKeyboard::Overlay::None;
+  g_vk.held_mask = 0;
+  g_vk.text_edit = nullptr;
+  g_vk.keys.clear();
+  g_vk.mods = 0;
+  g_vk.caps = false;
 }
 
 void wm_virtual_keyboard_window_close(wmWindow *win)

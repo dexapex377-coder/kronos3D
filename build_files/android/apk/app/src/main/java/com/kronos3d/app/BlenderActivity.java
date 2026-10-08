@@ -79,17 +79,29 @@ public class BlenderActivity extends NativeActivity {
   private native void nativeOnCommitText(String text);
   private native void nativeOnKey(int keycode, int action, int metaState);
   private native void nativeOpenMainFile(String path);
-  /** Sends a modifier + key as a real GHOST key sequence. See ShortcutsOverlay.kt. */
-  private native void nativeSendKeyCombo(int modifierKeyCode, int keyCode, int metaState);
+  /**
+   * Sends several modifiers plus one key as a real GHOST key sequence.
+   *
+   * <p>{@code modifierMask} is a packed list of Android key codes, up to four of them,
+   * lowest code in the low bits. All of them go down before the key and come back up
+   * after it, so Ctrl+Shift+Alt+G reaches the keymap with every modifier held at once.
+   * A single modifier code cannot express that: the previous signature took one keycode
+   * and the Java side picked a single winner with an if/else chain.
+   */
+  private native void nativeSendKeyCombo(int modifierMask, int keyCode, int metaState);
 
   /**
-   * Run a shortcut as a real key sequence: modifier down, key down/up, modifier up.
+   * Run a shortcut as a real key sequence: every modifier down, key down/up, every
+   * modifier up.
    *
-   * <p>The modifier goes out as its own GHOST key event rather than only as a bit in
-   * the meta state, because Blender's keymap is evaluated from which modifier keys
-   * GHOST has seen. Sending only the meta bit left that view stale, so a Shift+X
-   * shortcut ran as a bare X, and because GHOST_SystemAndroid::meta_state_ persists
-   * between events, the stale modifier leaked into the next shortcut too.
+   * <p>Modifiers go out as their own GHOST key events rather than only as bits in the
+   * meta state, because Blender's keymap is evaluated from which modifier keys GHOST has
+   * seen. Sending only the meta bit left that view stale, so a Shift+X shortcut ran as a
+   * bare X, and because GHOST_SystemAndroid::meta_state_ persists between events, the
+   * stale modifier leaked into the next shortcut too.
+   *
+   * <p>All modifiers in the mask are held at once, so Ctrl+Shift+A works; the earlier
+   * single-modifier form kept only the first match of an if/else chain.
    *
    * <p>Safe to call before the surface exists: the native side queues under
    * java_input_mutex_ and drainJavaInput() drops events with no window attached.
@@ -100,17 +112,38 @@ public class BlenderActivity extends NativeActivity {
        * keyCode 0 would be a key event with no key. */
       return;
     }
-    int modifierKeyCode = 0;
+
+    /* Pack every held modifier into a mask: 10 bits per keycode, since Android keycodes
+     * stay well under 1024. Independent ifs, not else-if: Ctrl+Shift+A has to hold both. */
+    int modifierMask = 0;
     if ((metaState & KeyEvent.META_CTRL_ON) != 0) {
-      modifierKeyCode = KeyEvent.KEYCODE_CTRL_LEFT;
+      modifierMask |= KeyEvent.KEYCODE_CTRL_LEFT;
     }
-    else if ((metaState & KeyEvent.META_ALT_ON) != 0) {
-      modifierKeyCode = KeyEvent.KEYCODE_ALT_LEFT;
+    if ((metaState & KeyEvent.META_ALT_ON) != 0) {
+      modifierMask |= KeyEvent.KEYCODE_ALT_LEFT << MODIFIER_SHIFT;
     }
-    else if ((metaState & KeyEvent.META_SHIFT_ON) != 0) {
-      modifierKeyCode = KeyEvent.KEYCODE_SHIFT_LEFT;
+    if ((metaState & KeyEvent.META_SHIFT_ON) != 0) {
+      modifierMask |= KeyEvent.KEYCODE_SHIFT_LEFT << (MODIFIER_SHIFT * 2);
     }
-    nativeSendKeyCombo(modifierKeyCode, keyCode, metaState);
+
+    nativeSendKeyCombo(modifierMask, keyCode, metaState);
+  }
+
+  /** Keycodes packed 10 bits wide, since Android keycodes stay well under 1024. */
+  private static final int MODIFIER_SHIFT = 10;
+  private static final int MODIFIER_MASK = (1 << MODIFIER_SHIFT) - 1;
+  /** Ctrl, Alt, Shift: the three modifiers the composer can hold. */
+  private static final int MAX_MODIFIERS = 3;
+
+  /** Number of modifier keycodes packed in {@link #nativeSendKeyCombo}'s first argument. */
+  public static int modifierMaskCount(int modifierMask) {
+    int count = 0;
+    for (int i = 0; i < MAX_MODIFIERS; i++) {
+      if (((modifierMask >> (MODIFIER_SHIFT * i)) & MODIFIER_MASK) != 0) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /**

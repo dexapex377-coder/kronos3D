@@ -24,13 +24,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -65,11 +68,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.roundToPx
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -81,7 +86,10 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import kotlin.math.ceil
 import kotlin.math.roundToInt
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.runtime.mutableFloatStateOf
 
 /**
  * The floating shortcuts panel, its trigger button, the key-combo keyboard and the
@@ -514,6 +522,15 @@ private data class GridShortcut(
             .ifEmpty { "sin tecla" }
 }
 
+/**
+ * Keys that act as held modifiers rather than as the key a shortcut triggers.
+ *
+ * Used by the composer's "Mantener" toggle: latching works on these, since a modifier
+ * has no meaning on its own. Order matches the precedence the native side applies when
+ * it packs several modifiers into one sequence.
+ */
+private val MODIFIER_KEY_IDS = listOf("shift_l", "ctrl_l", "alt_l", "shift_r", "ctrl_r", "alt_r")
+
 /** Label a key carries on the composer keyboard, e.g. shift_l -> "Shift". */
 private fun keyLabel(id: String): String? =
     ALL_KEY_ITEMS.firstOrNull { it.id == id }?.label
@@ -613,6 +630,8 @@ private fun ShortcutsPanel(
     var pendingCombo by remember { mutableStateOf<List<String>>(emptyList()) }
 
     val selectedKeyIds = remember { mutableStateListOf<String>() }
+    /** Modifiers latched on via "Mantener": added to every combo built from here. */
+    val latchedModifierIds = remember { mutableStateListOf<String>() }
     // No KEY_TABLE filtering here. It used to drop any shortcut containing an
     // unknown key id, so a mapping gap silently deleted saved work on reopen.
     // Shortcuts are now kept as written; GridShortcutCard flags unmappable ones.
@@ -768,38 +787,53 @@ private fun ShortcutsPanel(
                         )
                     }
                 } else {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxWidth().heightIn(max = 230.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                        contentPadding = PaddingValues(vertical = 2.dp),
+                    val gridState = rememberLazyGridState()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        items(shortcuts, key = { it.id }) { item ->
-                            GridShortcutCard(
-                                item = item,
-                                isDeleteMode = isDeleteMode,
-                                onClick = {
-                                    if (isDeleteMode) {
-                                        shortcuts.remove(item)
-                                        if (shortcuts.isEmpty()) isDeleteMode = false
-                                        persist()
-                                    } else {
-                                        val missing = item.combo.filter { k -> !KEY_TABLE.containsKey(k) }
-                                        if (missing.isNotEmpty()) {
-                                            android.widget.Toast.makeText(
-                                                context,
-                                                "Sin asignar en el teclado nativo: " +
-                                                    missing.joinToString("+") { keyLabel(it) ?: it },
-                                                android.widget.Toast.LENGTH_SHORT,
-                                            ).show()
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(5),
+                            state = gridState,
+                            modifier = Modifier.weight(1f).heightIn(max = 210.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            contentPadding = PaddingValues(vertical = 2.dp),
+                        ) {
+                            items(shortcuts, key = { it.id }) { item ->
+                                GridShortcutCard(
+                                    item = item,
+                                    isDeleteMode = isDeleteMode,
+                                    onClick = {
+                                        if (isDeleteMode) {
+                                            shortcuts.remove(item)
+                                            if (shortcuts.isEmpty()) isDeleteMode = false
+                                            persist()
                                         } else {
-                                            onSendCombo(item.combo)
+                                            val missing = item.combo.filter { k -> !KEY_TABLE.containsKey(k) }
+                                            if (missing.isNotEmpty()) {
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    "Sin asignar en el teclado nativo: " +
+                                                        missing.joinToString("+") { keyLabel(it) ?: it },
+                                                    android.widget.Toast.LENGTH_SHORT,
+                                                ).show()
+                                            } else {
+                                                onSendCombo(item.combo)
+                                            }
                                         }
-                                    }
-                                },
-                            )
+                                    },
+                                )
+                            }
                         }
+                        // Explicit scrollbar: the grid is taller than the panel, and
+                        // without a visible thumb there is no hint that the rest of
+                        // the shortcuts exist.
+                        GridScrollbar(
+                            state = gridState,
+                            itemCount = shortcuts.size,
+                            modifier = Modifier.width(3.dp).height(210.dp),
+                        )
                     }
                 }
             }
@@ -813,7 +847,15 @@ private fun ShortcutsPanel(
                 if (selectedKeyIds.contains(id)) selectedKeyIds.remove(id)
                 else selectedKeyIds.add(id)
             },
-            onClearAll = { selectedKeyIds.clear() },
+            onClearAll = { selectedKeyIds.clear(); latchedModifierIds.clear() },
+            latchedModifierIds = latchedModifierIds,
+            onToggleLatch = {
+                /* Latch whichever modifier is currently selected, or drop all of them.
+                 * Latching a modifier that is not selected would add a key the user never
+                 * tapped, so the selection is what drives it. */
+                val mods = selectedKeyIds.filter { MODIFIER_KEY_IDS.contains(it) }
+                if (mods.isEmpty()) latchedModifierIds.clear() else latchedModifierIds.clear(); latchedModifierIds.addAll(mods)
+            },
             onConfirm = { combo ->
                 pendingCombo = combo.toList()
                 showKeyboard = false
@@ -840,6 +882,7 @@ private fun ShortcutsPanel(
                 // Start the next composer from empty, otherwise the previous
                 // selection is still there and OK re-saves that combo instead.
                 selectedKeyIds.clear()
+                latchedModifierIds.clear()
                 persist()
                 showNameDialog = false
             },
@@ -857,6 +900,48 @@ private fun MenuEntry(text: String, modifier: Modifier = Modifier, onClick: () -
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = KeyLabel, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * Minimal vertical scrollbar for the shortcut grid.
+ *
+ * Compose has no stock scrollbar for lazy grids, and the panel is capped in height,
+ * so the overflow was invisible and it read as "one shortcut replaced another".
+ * The thumb length is proportional to what fraction of the rows fit on screen, and it
+ * hides when everything already fits.
+ */
+@Composable
+private fun GridScrollbar(
+    state: LazyGridState,
+    itemCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    if (itemCount <= 0) return
+    val density = LocalDensity.current
+    val viewportPx = with(density) { 210.dp.roundToPx() }
+    val rows = ceil(itemCount / 5f).coerceAtLeast(1f)
+    val visibleRows = minOf(ceil(viewportPx / maxOf(state.layoutInfo.minorAxisItemSize, 1f)), rows)
+    val fraction = (visibleRows / rows).coerceIn(0.15f, 1f)
+
+    val thumbHeightPx = (viewportPx * fraction).roundToInt()
+    val maxScroll = (state.layoutInfo.totalItemsExtent - state.layoutInfo.viewportEndOffset)
+    val progress = if (maxScroll <= 0) 0f
+    else (state.firstVisibleItemIndex / maxOf(itemCount - visibleRows.toInt(), 1)).coerceIn(0f, 1f)
+
+    Box(
+        modifier = modifier.background(Color(0x22FFFFFF), RoundedCornerShape(2.dp)),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        if (maxScroll > 0) {
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(with(density) { thumbHeightPx.toDp() })
+                    .offset(y = with(density) { (progress * (viewportPx - thumbHeightPx)).toDp() })
+                    .background(Color(0xFF90A4AE), RoundedCornerShape(2.dp)),
+            )
+        }
     }
 }
 
@@ -932,6 +1017,9 @@ private fun VisualKeyboard(
     onClearAll: () -> Unit,
     onConfirm: (List<String>) -> Unit,
     onDismiss: () -> Unit,
+    /** Modifier key ids latched on: they stay in the combination until untoggled. */
+    latchedModifierIds: List<String>,
+    onToggleLatch: () -> Unit,
 ) {
     val keyLookup = remember { mutableStateListOf<Pair<String, String>>() }
     if (keyLookup.isEmpty()) {
@@ -940,6 +1028,14 @@ private fun VisualKeyboard(
     val lookup = keyLookup.associate { it.first to it.second }
 
     val comboString = selectedKeyIds.mapNotNull { lookup[it] }.distinct().joinToString("+")
+
+    /* Drag the sheet up and down by its handle. The sheet lives in a Dialog, so it is not
+     * a window that can be moved the way the panel is; translating the surface inside its
+     * own bounds is what keeps the handle useful without a second window. */
+    var dragOffset by remember { mutableStateOf(0f) }
+    var dragStart by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    val maxDrag = with(density) { 160.dp.toPx() }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -955,7 +1051,10 @@ private fun VisualKeyboard(
             Surface(
                 // clickable(enabled=false) keeps taps off the scrim: the outer Box
                 // owns dismissal, the sheet itself must not bubble into it.
-                modifier = Modifier.fillMaxWidth().clickable(enabled = false) {},
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .offset { IntOffset(0, dragOffset.roundToInt()) }
+                    .clickable(enabled = false) {},
                 color = Color(0xFF14171C),
                 shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
                 border = BorderStroke(1.dp, Color(0xFF28303D)),
@@ -1009,9 +1108,59 @@ private fun VisualKeyboard(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            /* Drag handle: lets the sheet be pushed up or down, since a
+                             * Dialog surface cannot be repositioned like the panel window. */
+                            Box(
+                                modifier = Modifier
+                                    .width(26.dp)
+                                    .height(24.dp)
+                                    .pointerInput(Unit) {
+                                        detectDragGestures(
+                                            onDragStart = { dragStart = dragOffset },
+                                            onDragEnd = { dragOffset = 0f },
+                                            onDragCancel = { dragOffset = 0f },
+                                        ) { change, amount ->
+                                            change.consume()
+                                            dragOffset = (dragStart + amount.y).coerceIn(0f, maxDrag)
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(18.dp)
+                                        .height(3.dp)
+                                        .background(Color(0xFF4A5568), RoundedCornerShape(2.dp)),
+                                )
+                            }
                             if (selectedKeyIds.isNotEmpty()) {
                                 TextButton(onClick = onClearAll) {
                                     Text("Limpiar", color = DangerRed, fontSize = 10.sp)
+                                }
+                            }
+                            /* Latching modifier. Tapping Shift normally means Shift+<next key>,
+                             * but on a touch composer you often want Shift held while you pick
+                             * several keys in a row. This toggles it as latched instead: it stays
+                             * in the combination until tapped again, so Ctrl+Shift+A can be built
+                             * as Ctrl, latch Shift, A in any order. */
+                            val latched = latchedModifierIds.isNotEmpty()
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (latched) Amber else CardFace,
+                                border = BorderStroke(1.dp, if (latched) Amber else CardBorder),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clickable { onToggleLatch() }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "Mantener",
+                                        color = if (latched) Color.Black else Color(0xFF90A4AE),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
                                 }
                             }
                             Surface(
@@ -1029,7 +1178,7 @@ private fun VisualKeyboard(
                                             // rewrote the previous one's combo
                                             // and the duplicate check below
                                             // then matched and replaced it.
-                                            onConfirm(selectedKeyIds.toList())
+                                            onConfirm(selectedKeyIds.toList() + latchedModifierIds.toList())
                                         }
                                         .padding(horizontal = 16.dp, vertical = 6.dp),
                                     contentAlignment = Alignment.Center,

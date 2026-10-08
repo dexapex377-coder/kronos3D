@@ -271,19 +271,38 @@ extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOn
  * next shortcut does not inherit it.
  */
 extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSendKeyCombo(
-    JNIEnv * /*env*/, jobject /*thiz*/, jint modifier_keycode, jint keycode, jint meta_state)
+    JNIEnv * /*env*/, jobject /*thiz*/, jint modifier_mask, jint keycode, jint meta_state)
 {
   GHOST_SystemAndroid *system = android_system_if_ready();
   if (!system) {
     return;
   }
-  if (modifier_keycode != 0) {
-    system->handleJavaKeyEvent(modifier_keycode, AKEY_EVENT_ACTION_DOWN, meta_state);
+
+  /* modifier_mask packs up to three Android keycodes, 10 bits each. Holding every one of
+   * them down is what makes Ctrl+Shift+A work; the previous single-keycode form could
+   * only ever press one modifier, so multi-modifier combinations silently lost all but
+   * one. Order does not matter to the keymap, which reads the modifiers GHOST has seen. */
+  constexpr int kModifierBits = 10;
+  constexpr int kModifierMask = (1 << kModifierBits) - 1;
+  constexpr int kMaxModifiers = 3;
+  int modifiers[kMaxModifiers];
+  int modifier_count = 0;
+  for (int i = 0; i < kMaxModifiers; i++) {
+    const int code = (modifier_mask >> (kModifierBits * i)) & kModifierMask;
+    if (code != 0) {
+      modifiers[modifier_count++] = code;
+    }
+  }
+
+  for (int i = 0; i < modifier_count; i++) {
+    system->handleJavaKeyEvent(modifiers[i], AKEY_EVENT_ACTION_DOWN, meta_state);
   }
   system->handleJavaKeyEvent(keycode, AKEY_EVENT_ACTION_DOWN, meta_state);
   system->handleJavaKeyEvent(keycode, AKEY_EVENT_ACTION_UP, meta_state);
-  if (modifier_keycode != 0) {
-    system->handleJavaKeyEvent(modifier_keycode, AKEY_EVENT_ACTION_UP, 0);
+  /* Release with meta 0: GHOST_SystemAndroid::meta_state_ persists between events, so
+   * leaving the modifiers set would leak them into the next shortcut. */
+  for (int i = 0; i < modifier_count; i++) {
+    system->handleJavaKeyEvent(modifiers[i], AKEY_EVENT_ACTION_UP, 0);
   }
 }
 
