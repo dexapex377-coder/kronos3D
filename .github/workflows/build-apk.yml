@@ -287,8 +287,13 @@ jobs:
           cd blender/build_files/android/apk
           export JAVA_HOME="${{ steps.setup-java.outputs.path }}"
           export ANDROID_HOME="$HOME/android-sdk"
-          # app/build.gradle resolves the stage dir relative to rootDir, and this is
-          # where the two live; the relative path only works from inside the repo.
+          # The runner image exports ANDROID_SDK_ROOT=/usr/local/lib/android/sdk while
+          # the steps above build the SDK this job needs under $HOME/android-sdk.
+          # AGP refuses to start when the two disagree ("Several environment variables
+          # and/or system properties contain different paths to the SDK"), and the
+          # stock one has no build-tools 35.0.1 or platform 35 anyway.
+          unset ANDROID_SDK_ROOT
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
           "${{ steps.setup-gradle.outputs.gradle-path }}/bin/gradle" assembleRelease \
             -PblenderConfig=full \
             -PblenderVersionName="5.3.0 Alpha" \
