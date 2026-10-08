@@ -258,34 +258,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Cache Gradle distribution and dependencies
-        id: cache-gradle
-        uses: actions/cache@v4
+      # The Gradle distribution comes from the official setup action rather than
+      # ./gradlew or a hand-rolled curl: the wrapper JAR is a Git LFS object the
+      # GitHub LFS store does not serve, and this runner's egress refuses a direct
+      # fetch from services.gradle.org. setup-gradle handles both, and caches the
+      # dependency cache keyed on the build files so only the first run pays for it.
+      - name: Setup Gradle 9.4.1
+        id: setup-gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          path: |
-            ~/.gradle/wrapper
-            ~/.gradle/caches
-          key: gradle-9.4.1-agp9.2.0-kotlin2.2.20-composebom2024.02.00-${{ hashFiles('blender/build_files/android/apk/build.gradle', 'blender/build_files/android/apk/app/build.gradle', 'blender/build_files/android/apk/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-9.4.1-agp9.2.0-kotlin2.2.20-composebom2024.02.00-
-
-      # The Gradle distribution is fetched straight from services.gradle.org rather
-      # than through ./gradlew: the wrapper JAR is a Git LFS object, the GitHub LFS
-      # store does not serve it, and package.sh has no reason to care. Downloading
-      # the distribution by URL sidesteps the LFS round trip entirely.
-      - name: Fetch Gradle 9.4.1
-        run: |
-          set -euo pipefail
-          DIST_URL=$(grep -oP 'distributionUrl=\K.*' \
-            blender/build_files/android/apk/gradle/wrapper/gradle-wrapper.properties | sed 's/\\//g')
-          echo "distribution: $DIST_URL"
-          mkdir -p "$HOME/tools"
-          curl -fsSL --retry 3 -o /tmp/gradle.zip "$DIST_URL"
-          unzip -q -o /tmp/gradle.zip -d "$HOME/tools"
-          GRADLE_BIN=$(find "$HOME/tools" -maxdepth 2 -name gradle -type f -path '*/bin/*' | head -1)
-          echo "GRADLE_BIN=$GRADLE_BIN" >> "$GITHUB_ENV"
-          test -x "$GRADLE_BIN"
-          "$GRADLE_BIN" --version | head -12
+          gradle-version: '9.4.1'
 
       - name: Stage native libs and runtime payload (package.sh --stage-only)
         run: |
@@ -307,7 +289,7 @@ jobs:
           export ANDROID_HOME="$HOME/android-sdk"
           # app/build.gradle resolves the stage dir relative to rootDir, and this is
           # where the two live; the relative path only works from inside the repo.
-          "$GRADLE_BIN" assembleRelease \
+          "${{ steps.setup-gradle.outputs.gradle-path }}/bin/gradle" assembleRelease \
             -PblenderConfig=full \
             -PblenderVersionName="5.3.0 Alpha" \
             -PblenderVersionCode=5030001 \
