@@ -78,7 +78,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.savedstate.SimpleSavedStateRegistryOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlin.math.roundToInt
 
@@ -281,7 +283,7 @@ object ShortcutsOverlay {
         // mutates and nothing ever redraws -- the panel looks alive and responds to
         // nothing. The saved-state side has no such requirement and gets the trivial
         // SimpleSavedStateRegistryOwner.
-        val savedStateOwner = SimpleSavedStateRegistryOwner()
+        val savedStateOwner = OverlaySavedStateOwner()
         return ComposeView(activity).apply {
             setViewTreeLifecycleOwner(ProcessLifecycleOwner.get())
             setViewTreeSavedStateRegistryOwner(savedStateOwner)
@@ -300,6 +302,26 @@ object ShortcutsOverlay {
             // LayoutParams and the view; the trigger button genuinely does not drag.
             setContent { MaterialTheme { content { _, _ -> } } }
         }
+    }
+
+    /**
+     * Saved-state owner for a ComposeView that has no Activity behind it.
+     *
+     * Compose reads this during composition but the panel keeps nothing that has to
+     * survive process death, so it only has to exist and be attached.
+     * androidx.savedstate has a ready-made SimpleSavedStateRegistryOwner for exactly
+     * this, but it is not on the classpath here.
+     */
+    private class OverlaySavedStateOwner : SavedStateRegistryOwner {
+        private val controller = SavedStateRegistryController.create(this)
+
+        init {
+            controller.performAttach()
+            controller.performRestore(null)
+        }
+
+        override val savedStateRegistry: SavedStateRegistry
+            get() = controller.savedStateRegistry
     }
 
     private fun removeWindow(view: View?) {
