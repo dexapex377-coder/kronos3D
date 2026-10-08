@@ -314,20 +314,28 @@ object ShortcutsOverlay {
      * this, but it is not on the classpath here.
      */
     private class OverlaySavedStateOwner : SavedStateRegistryOwner {
+        /**
+         * Declared before [controller] on purpose, and the ordering is load-bearing.
+         *
+         * Kotlin initialises properties and init blocks in declaration order, and
+         * SavedStateRegistryController.create() reads owner.lifecycle straight away.
+         * With the controller declared first, lifecycle had not been assigned yet and
+         * create() threw
+         *
+         *   IllegalStateException: Restarter must be created only during owner's
+         *   initialization stage
+         *
+         * which killed the app on the first frame, from onWindowFocusChanged. Putting
+         * lifecycle first is what OBlender's SimpleSavedStateRegistryOwner does.
+         */
+        override val lifecycle: Lifecycle = ProcessLifecycleOwner.get().lifecycle
+
         private val controller = SavedStateRegistryController.create(this)
 
         init {
             controller.performAttach()
             controller.performRestore(null)
         }
-
-        /**
-         * SavedStateRegistryOwner extends LifecycleOwner since savedstate 1.2, so this
-         * has to exist as well. Delegated rather than backed by a second registry:
-         * two independent lifecycle sources for one view is how they drift apart.
-         */
-        override val lifecycle: Lifecycle
-            get() = ProcessLifecycleOwner.get().lifecycle
 
         override val savedStateRegistry: SavedStateRegistry
             get() = controller.savedStateRegistry
