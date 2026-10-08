@@ -43,10 +43,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ProcessLifecycleOwner
-import androidx.compose.ui.platform.SavedStateRegistryOwner
-import androidx.compose.ui.platform.setViewTreeLifecycleOwner
-import androidx.compose.ui.platform.setViewTreeSavedStateRegistryOwner
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -54,8 +52,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.core.os.bundleOf
 import kotlin.math.roundToInt
 
@@ -395,8 +397,8 @@ private fun ShortcutsPanel(
     onSendKey: (Int, Int) -> Unit,
     onToggleKeyboard: () -> Unit,
 ) {
-    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-    val density = androidx.compose.ui.platform.LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
     val panelWidthPx = with(density) { PANEL_WIDTH_DP.dp.toPx() }
     val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
     val marginPx = with(density) { 16.dp.toPx() }
