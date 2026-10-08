@@ -673,9 +673,35 @@ build_vpx() {
   echo "[deps] installed vpx -> $LIBDIR/vpx"
 }
 
+# Fetch the first URL that yields a valid archive, trying each in order.
+#
+# code.videolan.org sits behind Cloudflare and intermittently answers a bot challenge
+# (a 7 KB HTML page) instead of the tarball, from datacenter IPs. curl -f does not
+# catch it because the status is 200. So the archive check is the real gate, and a
+# mirror is tried before giving up.
+fetch_any() {
+  local file="$1"; shift
+  local url
+  for url in "$@"; do
+    if fetch "$file" "$url"; then
+      return 0
+    fi
+    echo "[deps] source unavailable, trying next: $url" >&2
+  done
+  echo "[deps] ERROR: every source failed for $file" >&2
+  return 1
+}
+
 build_x264() {
   local v; v="$(dep_version X264_VERSION)"
-  fetch "x264-$v.tar.gz" "https://code.videolan.org/videolan/x264/-/archive/$v/x264-$v.tar.gz"
+  # code.videolan.org is behind Cloudflare and intermittently answers a bot challenge
+  # -- a 7 KB "Making sure you're not a bot" HTML page with a 200 status, which
+  # curl -f cannot catch -- so the archive check is the real gate here and the
+  # GitHub mirror is tried next. Same commit hash, same tarball root directory, so
+  # extract()'s --strip-components=1 behaves identically on either.
+  fetch_any "x264-$v.tar.gz" \
+    "https://code.videolan.org/videolan/x264/-/archive/$v/x264-$v.tar.gz" \
+    "https://github.com/mirror/x264/archive/$v.tar.gz" || return 1
   local src; src="$(extract "x264-$v.tar.gz" x264)"
   export CC="$ANDROID_LLVM_BIN/aarch64-linux-android${ANDROID_API}-clang"
   export AR="$ANDROID_LLVM_BIN/llvm-ar" RANLIB="$ANDROID_LLVM_BIN/llvm-ranlib" \
