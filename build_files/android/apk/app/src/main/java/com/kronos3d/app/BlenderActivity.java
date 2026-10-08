@@ -388,17 +388,30 @@ public class BlenderActivity extends NativeActivity {
      * or a system dialog); re-apply it. */
     if (hasFocus) {
       enterImmersive();
-      /* The shortcuts panel and its trigger are WindowManager windows rather than
-       * views of this activity, so nothing removes them for us: a window manager
-       * outlives the activity that added it and its token dies with it, leaving a
-       * floating button floating over whatever is next. Put them back whenever this
-       * window actually has focus. */
+      /* Put the shortcuts trigger back whenever this window actually has focus: it is
+       * a WindowManager window, so nothing removes it for us, and a window manager
+       * outlives the activity that added it. */
       ShortcutsOverlay.installTrigger(this);
     }
-    else {
-      ShortcutsOverlay.hide();
-      ShortcutsOverlay.uninstallTrigger();
-    }
+    /* Deliberately nothing on focus loss. Opening the key-combo dialog or the
+     * overflow dropdown takes focus away from this window for as long as they are up,
+     * and tearing the panel down here closed them again on the same frame -- the
+     * keyboard would flash and vanish, taking the shortcuts panel with it. Teardown
+     * belongs in onStop, which only fires when the activity really goes away. */
+  }
+
+  @Override
+  protected void onStop() {
+    ShortcutsOverlay.hide();
+    ShortcutsOverlay.uninstallTrigger();
+    super.onStop();
+  }
+
+  @Override
+  protected void onDestroy() {
+    ShortcutsOverlay.hide();
+    ShortcutsOverlay.uninstallTrigger();
+    super.onDestroy();
   }
 
   /**
