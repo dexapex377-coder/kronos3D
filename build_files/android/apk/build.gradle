@@ -1,26 +1,21 @@
 // Top-level build file. Pins the Android Gradle Plugin and the Kotlin/Compose
-// compiler plugins.
+// plugins, which have to be resolved here because `plugins { id ... }` without a
+// version can only find something a parent project already put on the classpath.
 //
 // Versions match the ones the upstream Blender android branch uses for its own
 // Gradle skeleton (AGP 9.2.0 / Gradle 9.4.1 in gradle/wrapper/gradle-wrapper.properties),
 // so the plugin and the distribution stay on the same compatibility row.
 //
-// The Kotlin plugins are applied here rather than in app/build.gradle because
-// plugin versions must be resolved before the module's own plugins block runs.
+// The Kotlin version has to be identical on both entries: Compose ships its
+// compiler inside the Kotlin plugin, and a mismatch between
+// kotlin-gradle-plugin and kotlin-compose-compiler-plugin-embeddable makes the
+// @Composable bodies compile to code that fails at runtime instead of at compile
+// time.
 
-buildscript {
-    repositories {
-        mavenCentral()
-        google()
-    }
-    dependencies {
-        classpath 'com.android.tools.build:gradle:9.2.0'
-        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20'
-        // Compose needs its own compiler plugin since Kotlin 2.0; without it the
-        // @Composable functions silently produce a runtime that crashes on first
-        // composition instead of failing at compile time.
-        classpath 'org.jetbrains.kotlin:kotlin-compose-compiler-plugin-embeddable:2.2.20'
-    }
+plugins {
+    id 'com.android.application' version '9.2.0' apply false
+    id 'org.jetbrains.kotlin.android' version '2.2.20' apply false
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.2.20' apply false
 }
 
 allprojects {
