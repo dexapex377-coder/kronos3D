@@ -125,7 +125,7 @@ object ShortcutsOverlay {
         val density = activity.resources.displayMetrics.density
         val sizePx = (44 * density).roundToInt()
 
-        val view = newComposeView(activity) {
+        val view = newComposeView(activity) { _ ->
             Box(
                 modifier = Modifier
                     .size(sizePx.dp)
@@ -171,11 +171,6 @@ object ShortcutsOverlay {
      * in one place is deliberate -- wiring the two by hand at each call site is how
      * the trigger button shipped with only one of them.
      */
-    private fun newComposeView(
-        activity: BlenderActivity,
-        content: @Composable () -> Unit,
-    ): ComposeView = newComposeView(activity) { _ -> content() }
-
     private fun newComposeView(
         activity: BlenderActivity,
         content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
