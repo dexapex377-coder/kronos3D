@@ -613,10 +613,11 @@ private fun ShortcutsPanel(
     var pendingCombo by remember { mutableStateOf<List<String>>(emptyList()) }
 
     val selectedKeyIds = remember { mutableStateListOf<String>() }
+    // No KEY_TABLE filtering here. It used to drop any shortcut containing an
+    // unknown key id, so a mapping gap silently deleted saved work on reopen.
+    // Shortcuts are now kept as written; GridShortcutCard flags unmappable ones.
     val shortcuts = remember {
-        mutableStateListOf<GridShortcut>().apply {
-            addAll(ShortcutStore.load(context).filter { it.combo.all { k -> KEY_TABLE.containsKey(k) } })
-        }
+        mutableStateListOf<GridShortcut>().apply { addAll(ShortcutStore.load(context)) }
     }
     fun persist() = ShortcutStore.save(context, shortcuts)
 
@@ -784,7 +785,17 @@ private fun ShortcutsPanel(
                                         if (shortcuts.isEmpty()) isDeleteMode = false
                                         persist()
                                     } else {
-                                        onSendCombo(item.combo)
+                                        val missing = item.combo.filter { k -> !KEY_TABLE.containsKey(k) }
+                                        if (missing.isNotEmpty()) {
+                                            android.widget.Toast.makeText(
+                                                context,
+                                                "Sin asignar en el teclado nativo: " +
+                                                    missing.joinToString("+") { keyLabel(it) ?: it },
+                                                android.widget.Toast.LENGTH_SHORT,
+                                            ).show()
+                                        } else {
+                                            onSendCombo(item.combo)
+                                        }
                                     }
                                 },
                             )
@@ -804,7 +815,7 @@ private fun ShortcutsPanel(
             },
             onClearAll = { selectedKeyIds.clear() },
             onConfirm = { combo ->
-                pendingCombo = combo
+                pendingCombo = combo.toList()
                 showKeyboard = false
                 showNameDialog = true
             },
@@ -817,11 +828,18 @@ private fun ShortcutsPanel(
             keyCombo = pendingCombo.mapNotNull { keyLabel(it) }.distinct().joinToString("+"),
             onDismiss = { showNameDialog = false },
             onSave = { name ->
-                // Re-saving an existing combination renames it instead of adding a
-                // second entry with the same combo.
-                val existing = shortcuts.indexOfFirst { it.combo == pendingCombo }
-                val shortcut = GridShortcut(label = name, combo = pendingCombo)
+                // toList() here too, so a saved combo can never alias pendingCombo or
+                // the keyboard's live selection: a shared list meant the next key
+                // tapped in the composer retroactively edited an already-saved
+                // shortcut, and the duplicate check below then matched it and
+                // overwrote it instead of appending.
+                val combo = pendingCombo.toList()
+                val existing = shortcuts.indexOfFirst { it.combo == combo }
+                val shortcut = GridShortcut(label = name, combo = combo)
                 if (existing >= 0) shortcuts[existing] = shortcut else shortcuts.add(shortcut)
+                // Start the next composer from empty, otherwise the previous
+                // selection is still there and OK re-saves that combo instead.
+                selectedKeyIds.clear()
                 persist()
                 showNameDialog = false
             },
@@ -844,10 +862,20 @@ private fun MenuEntry(text: String, modifier: Modifier = Modifier, onClick: () -
 
 @Composable
 private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick: () -> Unit) {
+    // Keys with no KEY_TABLE entry cannot be sent. Previously these were dropped at
+    // load time; now the card stays and says so, so the gap is visible instead of
+    // silently losing the shortcut or doing nothing when tapped.
+    val unmappable = item.combo.filter { k -> !KEY_TABLE.containsKey(k) }
+    val broken = unmappable.isNotEmpty()
+
     Surface(
         shape = RoundedCornerShape(6.dp),
         color = if (isDeleteMode) Color(0xCCB71C1C) else CardFace,
-        border = BorderStroke(1.dp, if (isDeleteMode) DangerRed else CardBorder),
+        border = BorderStroke(1.dp, when {
+            isDeleteMode -> DangerRed
+            broken -> Color(0xFFCC8800)
+            else -> CardBorder
+        }),
         modifier = Modifier.fillMaxWidth().height(36.dp).clickable(onClick = onClick),
     ) {
         Row(
@@ -871,8 +899,12 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = if (isDeleteMode) "Borrar" else item.keyHint,
-                    color = Color(0xFF90A4AE),
+                    text = when {
+                        isDeleteMode -> "Borrar"
+                        broken -> "Sin mapear: " + unmappable.joinToString("+")
+                        else -> item.keyHint
+                    },
+                    color = if (broken) Color(0xFFCC8800) else Color(0xFF90A4AE),
                     fontSize = 8.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -989,7 +1021,15 @@ private fun VisualKeyboard(
                                 Box(
                                     modifier = Modifier
                                         .clickable(enabled = selectedKeyIds.isNotEmpty()) {
-                                            onConfirm(selectedKeyIds)
+                                            // toList(): this is the live keyboard
+                                            // selection. Handing over the
+                                            // reference made a saved shortcut
+                                            // share state with the next key
+                                            // tapped, so adding a shortcut
+                                            // rewrote the previous one's combo
+                                            // and the duplicate check below
+                                            // then matched and replaced it.
+                                            onConfirm(selectedKeyIds.toList())
                                         }
                                         .padding(horizontal = 16.dp, vertical = 6.dp),
                                     contentAlignment = Alignment.Center,
