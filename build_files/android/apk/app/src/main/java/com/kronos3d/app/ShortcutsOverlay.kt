@@ -68,13 +68,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.toPx
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -86,10 +84,9 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import kotlin.math.ceil
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.unit.roundToPx
 
 /**
  * The floating shortcuts panel, its trigger button, the key-combo keyboard and the
@@ -525,6 +522,9 @@ private data class GridShortcut(
 /** Shortcut tiles per row. Also drives the scrollbar's row maths, so they cannot drift. */
 private const val GRID_COLUMNS = 5
 
+/** Height of the shortcut grid and its scrollbar track. */
+private const val GRID_TRACK_DP = 210f
+
 /**
  * Keys that act as held modifiers rather than as the key a shortcut triggers.
  *
@@ -798,7 +798,7 @@ private fun ShortcutsPanel(
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(GRID_COLUMNS),
                             state = gridState,
-                            modifier = Modifier.weight(1f).heightIn(max = 210.dp),
+                            modifier = Modifier.weight(1f).heightIn(max = GRID_TRACK_DP.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                             contentPadding = PaddingValues(vertical = 2.dp),
@@ -835,7 +835,7 @@ private fun ShortcutsPanel(
                         GridScrollbar(
                             state = gridState,
                             itemCount = shortcuts.size,
-                            modifier = Modifier.width(3.dp).height(210.dp),
+                            modifier = Modifier.width(3.dp).height(GRID_TRACK_DP.dp),
                         )
                     }
                 }
@@ -924,27 +924,15 @@ private fun GridScrollbar(
         Box(modifier)
         return
     }
-    val density = LocalDensity.current
-    val trackHeightPx = with(density) { 210.dp.toPx() }
-
-    val rows = ceil(itemCount / GRID_COLUMNS.toFloat()).toInt().coerceAtLeast(1)
-    /* Derive the thumb from the first laid-out row rather than from layout properties
-     * that do not exist on LazyGridState: minorAxisItemSize and totalItemsExtent are
-     * LazyListState members, and referencing them does not compile. */
-    val rowHeightPx = state.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.toFloat()
-    val visibleRows = if (rowHeightPx != null && rowHeightPx > 0f) {
-        ceil(trackHeightPx / rowHeightPx).toInt().coerceIn(1, rows)
-    }
-    else {
-        rows
-    }
-
+    val rows = ((itemCount + GRID_COLUMNS - 1) / GRID_COLUMNS).coerceAtLeast(1)
+    /* Count what is on screen instead of reading layout extents: minorAxisItemSize and
+     * totalItemsExtent are LazyListState members and do not exist on LazyGridState. */
+    val visibleRows = state.layoutInfo.visibleItemsInfo.size.coerceIn(1, rows)
     val canScroll = rows > visibleRows
-    val fraction = (visibleRows.toFloat() / rows.toFloat()).coerceIn(0.15f, 1f)
-    val thumbHeightPx = (trackHeightPx * fraction).roundToInt()
-    val scrollRangePx = trackHeightPx - thumbHeightPx
-    val maxFirstIndex = (rows - visibleRows).coerceAtLeast(1)
-    val progress = (state.firstVisibleItemIndex.toFloat() / maxFirstIndex.toFloat()).coerceIn(0f, 1f)
+    val thumbDp = GRID_TRACK_DP * visibleRows.toFloat() / rows.toFloat()
+    val scrollRangeDp = GRID_TRACK_DP - thumbDp
+    val maxFirstRow = (rows - visibleRows).coerceAtLeast(1)
+    val progress = (state.firstVisibleItemIndex.toFloat() / maxFirstRow.toFloat()).coerceIn(0f, 1f)
 
     Box(
         modifier = modifier.background(Color(0x22FFFFFF), RoundedCornerShape(2.dp)),
@@ -954,8 +942,8 @@ private fun GridScrollbar(
             Box(
                 modifier = Modifier
                     .width(3.dp)
-                    .height(with(density) { thumbHeightPx.toDp() })
-                    .offset(y = with(density) { (progress * scrollRangePx).toDp() })
+                    .height(thumbDp.dp)
+                    .offset(y = (progress * scrollRangeDp).dp)
                     .background(Color(0xFF90A4AE), RoundedCornerShape(2.dp)),
             )
         }
@@ -1049,10 +1037,9 @@ private fun VisualKeyboard(
     /* Drag the sheet up and down by its handle. The sheet lives in a Dialog, so it is not
      * a window that can be moved the way the panel is; translating the surface inside its
      * own bounds is what keeps the handle useful without a second window. */
-    var dragOffset by remember { mutableStateOf(0f) }
-    var dragStart by remember { mutableFloatStateOf(0f) }
-    val density = LocalDensity.current
-    val maxDrag = with(density) { 160.dp.toPx() }
+    var dragOffset by remember { mutableStateOf(0.dp) }
+    var dragStart by remember { mutableStateOf(0.dp) }
+    val maxDrag = 160.dp
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1076,7 +1063,7 @@ Box(
                 // owns dismissal, the sheet itself must not bubble into it.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset { IntOffset(0, dragOffset.roundToInt()) }
+                    .offset { IntOffset(0, dragOffset.roundToPx()) }
                     .clickable(enabled = false) {},
                 color = Color(0xFF14171C),
                 shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
@@ -1140,11 +1127,11 @@ Box(
                                     .pointerInput(Unit) {
                                         detectDragGestures(
                                             onDragStart = { dragStart = dragOffset },
-                                            onDragEnd = { dragOffset = 0f },
-                                            onDragCancel = { dragOffset = 0f },
+                                            onDragEnd = { dragOffset = 0.dp },
+                                            onDragCancel = { dragOffset = 0.dp },
                                         ) { change, amount ->
                                             change.consume()
-                                            dragOffset = (dragStart + amount.y).coerceIn(0f, maxDrag)
+                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(0.dp, maxDrag)
                                         }
                                     },
                                 contentAlignment = Alignment.Center,
