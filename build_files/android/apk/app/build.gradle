@@ -27,8 +27,13 @@ def stageDir = "${rootDir}/../../../../blender_build_android/android_apk_stage_$
 
 // versionName carries a space ("5.3.0 Alpha"), which is why it is quoted here and
 // why it cannot be left to aapt2's --rename-manifest-package path any more.
-def versionName = project.findProperty('blenderVersionName') ?: '5.3.0 Alpha'
-def versionCode = (project.findProperty('blenderVersionCode') ?: '5030001').toInteger()
+//
+// The locals are prefixed app* on purpose: inside defaultConfig, Groovy reads a
+// bare `versionCode value` as a method call on the local, so naming them
+// versionCode/versionName makes the build die with "No signature of method:
+// java.lang.Integer.call()".
+def appVersionName = project.findProperty('blenderVersionName') ?: '5.3.0 Alpha'
+def appVersionCode = (project.findProperty('blenderVersionCode') ?: '5030001').toInteger()
 
 android {
   namespace 'com.kronos3d.app'
@@ -39,8 +44,8 @@ android {
     minSdk 31
     targetSdk 34
 
-    versionCode versionCode
-    versionName versionName
+    versionCode appVersionCode
+    versionName appVersionName
 
     ndk { abiFilters 'arm64-v8a' }
   }
