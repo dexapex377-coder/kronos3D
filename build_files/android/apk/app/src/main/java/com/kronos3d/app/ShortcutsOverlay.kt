@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -47,8 +46,6 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -372,6 +369,7 @@ private val PanelHeader = Color(0xFF8A99AD)
 private val CardFace = Color(0xFF222731)
 private val CardBorder = Color(0xFF333D4D)
 private val ChromeFace = Color(0xFF1E293B)
+private val KeyLabel = Color(0xFFDCE3EC)
 private val Teal = Color(0xFF00838F)
 private val Amber = Color(0xFFFF9100)
 private val DangerRed = Color(0xFFFF5252)
@@ -489,10 +487,25 @@ private data class GridShortcut(
     val icon: ImageVector = Icons.Default.Star,
 ) {
     val id: String get() = combo.joinToString("+")
-    /** Human-readable combo, e.g. "CTRL+Z", straight from the key ids. */
+
+    /**
+     * Human-readable combo, e.g. "Shift+A".
+     *
+     * Built from the keyboard layout's labels rather than from the key ids: those are
+     * internal names, so uppercasing them rendered "SHIFT_L+A", "NP_0", "BACKTICK".
+     * The two shift keys share the label "Shift" and the two alt/ctrl pairs likewise,
+     * so duplicates collapse and the hint reads "Shift+A" rather than "Shift+Shift+A".
+     */
     val keyHint: String
-        get() = combo.joinToString("+") { it.uppercase() }.ifEmpty { "sin tecla" }
+        get() = combo.mapNotNull { keyLabel(it) }
+            .distinct()
+            .joinToString("+")
+            .ifEmpty { "sin tecla" }
 }
+
+/** Label a key carries on the composer keyboard, e.g. shift_l -> "Shift". */
+private fun keyLabel(id: String): String? =
+    ALL_KEY_ITEMS.firstOrNull { it.id == id }?.label
 
 /**
  * Shortcut list, persisted in SharedPreferences.
@@ -525,6 +538,49 @@ private object ShortcutStore {
             .apply()
     }
 }
+
+/**
+ * Write the shortcut list next to the app's external files, one `name=combo` per line.
+ *
+ * Deliberately a plain text file in getExternalFilesDir: that path is readable from a
+ * file manager and pullable over adb, so a list can be moved between devices without
+ * adding a file picker or a storage permission to the manifest.
+ */
+private fun exportShortcuts(context: Context) {
+    val list = ShortcutStore.load(context)
+    val text = list.joinToString("\n") { s -> s.label + "=" + s.combo.joinToString("+") }
+    val file = java.io.File(context.getExternalFilesDir(null), EXPORT_FILE)
+    runCatching { file.writeText(text) }
+        .onSuccess { android.widget.Toast.makeText(context, "Exportado: ${file.name}", android.widget.Toast.LENGTH_SHORT).show() }
+        .onFailure { android.widget.Toast.makeText(context, "No se pudo exportar", android.widget.Toast.LENGTH_SHORT).show() }
+}
+
+/** Read back whatever exportShortcuts wrote, replacing the current list. */
+private fun importShortcuts(context: Context, into: MutableList<GridShortcut>) {
+    val file = java.io.File(context.getExternalFilesDir(null), EXPORT_FILE)
+    val ok = runCatching {
+        val parsed = file.readLines()
+            .filter { it.isNotBlank() && it.contains('=') }
+            .map { line ->
+                val name = line.substringBefore('=')
+                val combo = line.substringAfter('=').split('+').filter { it.isNotBlank() }
+                GridShortcut(label = name, combo = combo)
+            }
+            .filter { it.combo.isNotEmpty() && it.combo.all { k -> KEY_TABLE.containsKey(k) } }
+        if (parsed.isNotEmpty()) {
+            into.clear()
+            into.addAll(parsed)
+        }
+        parsed.isNotEmpty()
+    }.getOrDefault(false)
+    android.widget.Toast.makeText(
+        context,
+        if (ok) "Atajos importados" else "No hay archivo para importar",
+        android.widget.Toast.LENGTH_SHORT,
+    ).show()
+}
+
+private const val EXPORT_FILE = "kronos3d_shortcuts.txt"
 
 // ---------------------------------------------------------------------------
 // Panel
@@ -650,37 +706,36 @@ private fun ShortcutsPanel(
                         )
                     }
 
-                    Box(modifier = Modifier.wrapContentSize(Alignment.TopEnd)) {
-                        Box(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .background(CardFace, RoundedCornerShape(6.dp))
-                                .clickable { showMenuDropdown = !showMenuDropdown },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = "Options",
-                                tint = Color.White,
-                                modifier = Modifier.size(15.dp),
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = showMenuDropdown,
-                            onDismissRequest = { showMenuDropdown = false },
-                            modifier = Modifier.background(PanelBackground),
-                        ) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text("Reset atajos", color = Color.White, fontSize = 11.sp)
-                                },
-                                onClick = {
-                                    showMenuDropdown = false
-                                    shortcuts.clear()
-                                    persist()
-                                },
-                            )
-                        }
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .background(CardFace, RoundedCornerShape(6.dp))
+                            .clickable { showMenuDropdown = !showMenuDropdown },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "Options",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                }
+            }
+
+            if (showMenuDropdown) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    MenuEntry("Export", Modifier.weight(1f)) {
+                        showMenuDropdown = false
+                        exportShortcuts(context)
+                    }
+                    MenuEntry("Import", Modifier.weight(1f)) {
+                        showMenuDropdown = false
+                        importShortcuts(context, shortcuts)
+                        persist()
                     }
                 }
             }
@@ -748,7 +803,7 @@ private fun ShortcutsPanel(
 
     if (showNameDialog) {
         SaveShortcutNameDialog(
-            keyCombo = pendingCombo.joinToString("+") { it.uppercase() },
+            keyCombo = pendingCombo.mapNotNull { keyLabel(it) }.distinct().joinToString("+"),
             onDismiss = { showNameDialog = false },
             onSave = { name ->
                 shortcuts.add(GridShortcut(label = name, combo = pendingCombo))
@@ -756,6 +811,19 @@ private fun ShortcutsPanel(
                 showNameDialog = false
             },
         )
+    }
+}
+
+@Composable
+private fun MenuEntry(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(24.dp)
+            .background(CardFace, RoundedCornerShape(5.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text, color = KeyLabel, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
