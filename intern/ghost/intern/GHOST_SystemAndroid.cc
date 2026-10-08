@@ -707,6 +707,69 @@ static GHOST_TKey convertAndroidKey(int32_t keycode)
       return GHOST_kKeyUpArrow;
     case AKEYCODE_DPAD_DOWN:
       return GHOST_kKeyDownArrow;
+
+    /* Modifiers.
+     *
+     * These matter as real GHOST key events, not just as meta_state bits. The
+     * shortcuts panel dispatches a combination as a real key sequence -- modifier
+     * down, key down, key up, modifier up -- because Blender's keymap is evaluated
+     * from getModifierKeys(), which GHOST fills from the modifier keys it has seen,
+     * and a meta bit that never arrives as a key leaves the keymap's view of the
+     * modifiers stuck.
+     *
+     * Android has no hardware Shift/Ctrl/Alt events here at all (there is no
+     * physical keyboard), so without these cases a Shift+X shortcut arrives as a
+     * bare X and runs whatever X is bound to. */
+    case AKEYCODE_SHIFT_LEFT:
+    case AKEYCODE_SHIFT_RIGHT:
+      return GHOST_kKeyLeftShift;
+    case AKEYCODE_CTRL_LEFT:
+    case AKEYCODE_CTRL_RIGHT:
+      return GHOST_kKeyLeftControl;
+    case AKEYCODE_ALT_LEFT:
+    case AKEYCODE_ALT_RIGHT:
+      return GHOST_kKeyLeftAlt;
+    case AKEYCODE_META_LEFT:
+    case AKEYCODE_META_RIGHT:
+      return GHOST_kKeyLeftOS;
+
+    /* Numpad. Blender binds a lot to it -- Numpad 1/3/7 are the orthographic views,
+     * Numpad period frames the selection, Numpad 5 toggles the camera -- so a
+     * shortcuts panel without these cannot reach any of it. Not contiguous in
+     * GHOST_TKey the way A-Z is, hence the explicit list. */
+    case AKEYCODE_NUMPAD_0:
+      return GHOST_kKeyNumpad0;
+    case AKEYCODE_NUMPAD_1:
+      return GHOST_kKeyNumpad1;
+    case AKEYCODE_NUMPAD_2:
+      return GHOST_kKeyNumpad2;
+    case AKEYCODE_NUMPAD_3:
+      return GHOST_kKeyNumpad3;
+    case AKEYCODE_NUMPAD_4:
+      return GHOST_kKeyNumpad4;
+    case AKEYCODE_NUMPAD_5:
+      return GHOST_kKeyNumpad5;
+    case AKEYCODE_NUMPAD_6:
+      return GHOST_kKeyNumpad6;
+    case AKEYCODE_NUMPAD_7:
+      return GHOST_kKeyNumpad7;
+    case AKEYCODE_NUMPAD_8:
+      return GHOST_kKeyNumpad8;
+    case AKEYCODE_NUMPAD_9:
+      return GHOST_kKeyNumpad9;
+    case AKEYCODE_NUMPAD_DOT:
+      return GHOST_kKeyNumpadPeriod;
+    case AKEYCODE_NUMPAD_DIVIDE:
+      return GHOST_kKeyNumpadSlash;
+    case AKEYCODE_NUMPAD_MULTIPLY:
+      return GHOST_kKeyNumpadAsterisk;
+    case AKEYCODE_NUMPAD_SUBTRACT:
+      return GHOST_kKeyNumpadMinus;
+    case AKEYCODE_NUMPAD_ADD:
+      return GHOST_kKeyNumpadPlus;
+    case AKEYCODE_NUMPAD_ENTER:
+      return GHOST_kKeyNumpadEnter;
+
     default:
       return GHOST_kKeyUnknown;
   }

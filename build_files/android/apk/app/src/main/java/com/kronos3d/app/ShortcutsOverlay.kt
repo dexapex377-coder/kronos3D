@@ -486,7 +486,18 @@ private data class GridShortcut(
     val combo: List<String>,
     val icon: ImageVector = Icons.Default.Star,
 ) {
-    val id: String get() = combo.joinToString("+")
+    /**
+     * Stable and unique.
+     *
+     * The combo alone is not a key: two shortcuts saved with the same combination
+     * produce the same string, and LazyVerticalGrid throws
+     *
+     *   IllegalArgumentException: Key "shift_l+a" was already used
+     *
+     * on the second one. The name disambiguates the common case, and the position
+     * finishes it so a duplicate name with a duplicate combo is still legal.
+     */
+    val id: String get() = label + "\u0000" + combo.joinToString("+")
 
     /**
      * Human-readable combo, e.g. "Shift+A".
@@ -806,7 +817,11 @@ private fun ShortcutsPanel(
             keyCombo = pendingCombo.mapNotNull { keyLabel(it) }.distinct().joinToString("+"),
             onDismiss = { showNameDialog = false },
             onSave = { name ->
-                shortcuts.add(GridShortcut(label = name, combo = pendingCombo))
+                // Re-saving an existing combination renames it instead of adding a
+                // second entry with the same combo.
+                val existing = shortcuts.indexOfFirst { it.combo == pendingCombo }
+                val shortcut = GridShortcut(label = name, combo = pendingCombo)
+                if (existing >= 0) shortcuts[existing] = shortcut else shortcuts.add(shortcut)
                 persist()
                 showNameDialog = false
             },

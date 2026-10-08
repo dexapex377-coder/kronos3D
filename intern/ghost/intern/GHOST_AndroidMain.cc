@@ -15,6 +15,7 @@
 #include "BLI_threads.hh"
 #include "GPU_context.hh"
 
+#include <android/keycodes.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
 #include <atomic>
@@ -254,6 +255,35 @@ extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOn
 {
   if (GHOST_SystemAndroid *system = android_system_if_ready()) {
     system->handleJavaKeyEvent(keycode, action, meta_state);
+  }
+}
+
+/* One key stroke from the shortcuts panel: a modifier keycode (or 0 for none), the
+ * key itself, and the meta state to advertise while it is held.
+ *
+ * The modifiers go out as their own real key events rather than only as meta bits,
+ * because Blender's keymap is evaluated from GHOST_EventManager's view of which
+ * modifier keys are down. Packing the modifier into meta_state alone leaves that view
+ * stale, and the panel's shortcuts then resolve to whatever is bound without it.
+ *
+ * Order matters: modifier down, key down, key up, modifier up. The final modifier
+ * release carries meta 0, which also clears GHOST_SystemAndroid::meta_state_ so the
+ * next shortcut does not inherit it.
+ */
+extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSendKeyCombo(
+    JNIEnv * /*env*/, jobject /*thiz*/, jint modifier_keycode, jint keycode, jint meta_state)
+{
+  GHOST_SystemAndroid *system = android_system_if_ready();
+  if (!system) {
+    return;
+  }
+  if (modifier_keycode != 0) {
+    system->handleJavaKeyEvent(modifier_keycode, AKEY_EVENT_ACTION_DOWN, meta_state);
+  }
+  system->handleJavaKeyEvent(keycode, AKEY_EVENT_ACTION_DOWN, meta_state);
+  system->handleJavaKeyEvent(keycode, AKEY_EVENT_ACTION_UP, meta_state);
+  if (modifier_keycode != 0) {
+    system->handleJavaKeyEvent(modifier_keycode, AKEY_EVENT_ACTION_UP, 0);
   }
 }
 

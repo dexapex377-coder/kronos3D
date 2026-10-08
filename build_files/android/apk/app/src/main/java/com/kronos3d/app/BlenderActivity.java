@@ -79,27 +79,38 @@ public class BlenderActivity extends NativeActivity {
   private native void nativeOnCommitText(String text);
   private native void nativeOnKey(int keycode, int action, int metaState);
   private native void nativeOpenMainFile(String path);
+  /** Sends a modifier + key as a real GHOST key sequence. See ShortcutsOverlay.kt. */
+  private native void nativeSendKeyCombo(int modifierKeyCode, int keyCode, int metaState);
 
   /**
-   * Send a key press/release pair on behalf of the shortcuts overlay.
+   * Run a shortcut as a real key sequence: modifier down, key down/up, modifier up.
    *
-   * <p>{@link #nativeOnKey} is private native, so this is the only door into it from
-   * Kotlin. It routes through GHOST_SystemAndroid::handleJavaKeyEvent, which converts
-   * the Android keycode and pushes a real GHOST_kEventKeyDown/Up: the shortcut lands
-   * in Blender's own keymap, so it is subject to modifiers and can be rebound from
-   * Preferences, exactly like a key on a physical keyboard.
+   * <p>The modifier goes out as its own GHOST key event rather than only as a bit in
+   * the meta state, because Blender's keymap is evaluated from which modifier keys
+   * GHOST has seen. Sending only the meta bit left that view stale, so a Shift+X
+   * shortcut ran as a bare X, and because GHOST_SystemAndroid::meta_state_ persists
+   * between events, the stale modifier leaked into the next shortcut too.
    *
    * <p>Safe to call before the surface exists: the native side queues under
    * java_input_mutex_ and drainJavaInput() drops events with no window attached.
    */
   public void sendShortcutKey(int keyCode, int metaState) {
     if (keyCode == 0) {
-      /* Modifier-only combination. Blender has no standalone modifier key to press,
-       * and sending keyCode 0 would be a key event with no key. */
+      /* Modifier-only combination. Blender has no standalone modifier to press, and
+       * keyCode 0 would be a key event with no key. */
       return;
     }
-    nativeOnKey(keyCode, KeyEvent.ACTION_DOWN, metaState);
-    nativeOnKey(keyCode, KeyEvent.ACTION_UP, metaState);
+    int modifierKeyCode = 0;
+    if ((metaState & KeyEvent.META_CTRL_ON) != 0) {
+      modifierKeyCode = KeyEvent.KEYCODE_CTRL_LEFT;
+    }
+    else if ((metaState & KeyEvent.META_ALT_ON) != 0) {
+      modifierKeyCode = KeyEvent.KEYCODE_ALT_LEFT;
+    }
+    else if ((metaState & KeyEvent.META_SHIFT_ON) != 0) {
+      modifierKeyCode = KeyEvent.KEYCODE_SHIFT_LEFT;
+    }
+    nativeSendKeyCombo(modifierKeyCode, keyCode, metaState);
   }
 
   /**
