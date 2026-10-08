@@ -1041,13 +1041,19 @@ private fun VisualKeyboard(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color(0xCC000000))
-                .clickable(onClick = onDismiss),
-            contentAlignment = Alignment.BottomCenter,
-        ) {
+Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    /* Transparent, not the 0xCC000000 it used to be. The sheet is for
+                     * typing as much as for shortcuts, and a full-screen 80% black scrim
+                     * hid the viewport, which is exactly what you want to watch while
+                     * naming something. Measured: 0.2 * 25 + 0.8 * 0 = 5, so every
+                     * untouched pixel of the 3D view came out at rgb(5,5,5). The tap
+                     * target stays, so the scrim still owns dismissal. */
+                    .background(Color.Transparent)
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
             Surface(
                 // clickable(enabled=false) keeps taps off the scrim: the outer Box
                 // owns dismissal, the sheet itself must not bubble into it.
