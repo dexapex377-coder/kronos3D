@@ -35,6 +35,21 @@ def stageDir = "${rootDir}/../../../../blender_build_android/android_apk_stage_$
 def appVersionName = project.findProperty('blenderVersionName') ?: '5.3.0 Alpha'
 def appVersionCode = (project.findProperty('blenderVersionCode') ?: '5030001').toInteger()
 
+// A keystore committed to the repo on purpose. AGP's own signingConfigs.debug
+// mints a throwaway key in ~/.android on whatever machine happens to run the build,
+// so every CI run produced an APK signed with a different key and none of them could
+// upgrade the previous one in place -- INSTALL_FAILED_UPDATE_INCOMPATIBLE every time,
+// and a reinstall on the device for each test. This is a debug key with a published
+// password; it signs nothing that ships. A real release key goes here instead.
+signingConfigs {
+  debug {
+    storeFile file("${rootDir}/debug.keystore")
+    storePassword 'android'
+    keyAlias 'androiddebugkey'
+    keyPassword 'android'
+  }
+}
+
 android {
   namespace 'com.kronos3d.app'
   compileSdk 35
@@ -77,8 +92,6 @@ android {
 
   buildTypes {
     release {
-      // Debug signing: the CI key is throwaway and no store upload exists yet.
-      // Swap for a real signingConfig before distributing outside CI.
       signingConfig signingConfigs.debug
     }
     debug {
