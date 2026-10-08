@@ -74,7 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.roundToPx
+import androidx.compose.ui.unit.toPx
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -522,6 +522,9 @@ private data class GridShortcut(
             .ifEmpty { "sin tecla" }
 }
 
+/** Shortcut tiles per row. Also drives the scrollbar's row maths, so they cannot drift. */
+private const val GRID_COLUMNS = 5
+
 /**
  * Keys that act as held modifiers rather than as the key a shortcut triggers.
  *
@@ -793,7 +796,7 @@ private fun ShortcutsPanel(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         LazyVerticalGrid(
-                            columns = GridCells.Fixed(5),
+                            columns = GridCells.Fixed(GRID_COLUMNS),
                             state = gridState,
                             modifier = Modifier.weight(1f).heightIn(max = 210.dp),
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -917,28 +920,42 @@ private fun GridScrollbar(
     itemCount: Int,
     modifier: Modifier = Modifier,
 ) {
-    if (itemCount <= 0) return
+    if (itemCount <= 0) {
+        Box(modifier)
+        return
+    }
     val density = LocalDensity.current
-    val viewportPx = with(density) { 210.dp.roundToPx() }
-    val rows = ceil(itemCount / 5f).coerceAtLeast(1f)
-    val visibleRows = minOf(ceil(viewportPx / maxOf(state.layoutInfo.minorAxisItemSize, 1f)), rows)
-    val fraction = (visibleRows / rows).coerceIn(0.15f, 1f)
+    val trackHeightPx = with(density) { 210.dp.toPx() }
 
-    val thumbHeightPx = (viewportPx * fraction).roundToInt()
-    val maxScroll = (state.layoutInfo.totalItemsExtent - state.layoutInfo.viewportEndOffset)
-    val progress = if (maxScroll <= 0) 0f
-    else (state.firstVisibleItemIndex / maxOf(itemCount - visibleRows.toInt(), 1)).coerceIn(0f, 1f)
+    val rows = ceil(itemCount / GRID_COLUMNS.toFloat()).toInt().coerceAtLeast(1)
+    /* Derive the thumb from the first laid-out row rather than from layout properties
+     * that do not exist on LazyGridState: minorAxisItemSize and totalItemsExtent are
+     * LazyListState members, and referencing them does not compile. */
+    val rowHeightPx = state.layoutInfo.visibleItemsInfo.firstOrNull()?.size?.toFloat()
+    val visibleRows = if (rowHeightPx != null && rowHeightPx > 0f) {
+        ceil(trackHeightPx / rowHeightPx).toInt().coerceIn(1, rows)
+    }
+    else {
+        rows
+    }
+
+    val canScroll = rows > visibleRows
+    val fraction = (visibleRows.toFloat() / rows.toFloat()).coerceIn(0.15f, 1f)
+    val thumbHeightPx = (trackHeightPx * fraction).roundToInt()
+    val scrollRangePx = trackHeightPx - thumbHeightPx
+    val maxFirstIndex = (rows - visibleRows).coerceAtLeast(1)
+    val progress = (state.firstVisibleItemIndex.toFloat() / maxFirstIndex.toFloat()).coerceIn(0f, 1f)
 
     Box(
         modifier = modifier.background(Color(0x22FFFFFF), RoundedCornerShape(2.dp)),
         contentAlignment = Alignment.TopCenter,
     ) {
-        if (maxScroll > 0) {
+        if (canScroll) {
             Box(
                 modifier = Modifier
                     .width(3.dp)
                     .height(with(density) { thumbHeightPx.toDp() })
-                    .offset(y = with(density) { (progress * (viewportPx - thumbHeightPx)).toDp() })
+                    .offset(y = with(density) { (progress * scrollRangePx).toDp() })
                     .background(Color(0xFF90A4AE), RoundedCornerShape(2.dp)),
             )
         }
