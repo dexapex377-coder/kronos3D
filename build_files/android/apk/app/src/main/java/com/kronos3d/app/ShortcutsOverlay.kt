@@ -262,7 +262,15 @@ object ShortcutsOverlay {
         content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
     ): ComposeView {
         val owners = OverlayLifecycleOwner()
+        // ON_CREATE alone is not enough, and the symptom is deceptively narrow: the
+        // Recomposer stays paused below STARTED, so every MutableState still mutates
+        // but nothing recomposes. The trigger button appeared to work because its
+        // action adds a WindowManager window from outside Compose, needing no
+        // recomposition -- while minimize, delete mode, the dropdown and the keyboard
+        // dialog are pure Compose state and did nothing at all.
         owners.dispatch(Lifecycle.Event.ON_CREATE)
+        owners.dispatch(Lifecycle.Event.ON_START)
+        owners.dispatch(Lifecycle.Event.ON_RESUME)
         return ComposeView(activity).apply {
             setViewTreeLifecycleOwner(owners)
             setViewTreeSavedStateRegistryOwner(owners)
@@ -276,7 +284,10 @@ object ShortcutsOverlay {
             // as four corner marks. PixelFormat.TRANSPARENT is correct one line below,
             // as the fifth argument of the LayoutParams, which really is a format.
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            setContent { MaterialTheme { content { _, _ -> } } }
+            // Pass the handler through rather than substituting a no-op: addComposeWindow
+            // relies on this being the real thing, and a silent no-op here looks
+            // exactly like "the drag does not work".
+            setContent { MaterialTheme { content(onDrag) } }
         }
     }
 
