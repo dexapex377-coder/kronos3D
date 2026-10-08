@@ -41,15 +41,6 @@ def appVersionCode = (project.findProperty('blenderVersionCode') ?: '5030001').t
 // upgrade the previous one in place -- INSTALL_FAILED_UPDATE_INCOMPATIBLE every time,
 // and a reinstall on the device for each test. This is a debug key with a published
 // password; it signs nothing that ships. A real release key goes here instead.
-signingConfigs {
-  debug {
-    storeFile file("${rootDir}/debug.keystore")
-    storePassword 'android'
-    keyAlias 'androiddebugkey'
-    keyPassword 'android'
-  }
-}
-
 android {
   namespace 'com.kronos3d.app'
   compileSdk 35
@@ -89,6 +80,18 @@ android {
   }
 
   androidResources { noCompress += 'zip' }
+
+  // Inside android {} on purpose: signingConfigs is a method of the Android
+  // extension, and declaring it at project level fails configuration with
+  // "Could not find method signingConfigs()".
+  signingConfigs {
+    debug {
+      storeFile file("${rootDir}/debug.keystore")
+      storePassword 'android'
+      keyAlias 'androiddebugkey'
+      keyPassword 'android'
+    }
+  }
 
   buildTypes {
     release {
