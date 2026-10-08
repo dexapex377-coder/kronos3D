@@ -103,9 +103,38 @@ dep_version() {
 # Download $2 to $DL_DIR/$1 if missing.
 fetch() {
   local file="$1" url="$2"
-  if [ ! -f "$DL_DIR/$file" ]; then
-    echo "[deps] fetching $file"
-    curl -sL --max-time 300 -o "$DL_DIR/$file" "$url"
+  local dest="$DL_DIR/$file"
+
+  # Verify before trusting the cache. A truncated or HTML-error-body download is
+  # worse than no download: `if [ ! -f ... ]` kept it forever, and the build then
+  # died much later at `gzip: stdin: not in gzip format` or `./configure: No such
+  # file or directory`, naming neither the network nor the tarball.
+  if [ -f "$dest" ] && gzip -t "$dest" 2>/dev/null; then
+    return
+  fi
+  if [ -f "$dest" ]; then
+    echo "[deps] cached $file is corrupt, refetching"
+    rm -f "$dest"
+  fi
+
+  echo "[deps] fetching $file"
+  # -f so an HTTP error is a non-zero exit instead of a saved error page;
+  # --retry because these hosts drop connections under CI load.
+  if ! curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+       --max-time 600 -o "$dest" "$url"; then
+    echo "[deps] ERROR: failed to download $file from $url" >&2
+    rm -f "$dest"
+    return 1
+  fi
+
+  # Last line of defence: say which file is bad instead of letting tar complain.
+  if ! gzip -t "$dest" 2>/dev/null; then
+    echo "[deps] ERROR: $file downloaded from $url is not a valid gzip stream" >&2
+    echo "[deps]        size=$(stat -c%s "$dest" 2>/dev/null || echo '?')" >&2
+    head -c 200 "$dest" | tr -d '\0' >&2 || true
+    echo >&2
+    rm -f "$dest"
+    return 1
   fi
 }
 
