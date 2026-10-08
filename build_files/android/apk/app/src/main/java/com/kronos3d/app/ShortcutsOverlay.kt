@@ -76,15 +76,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.SimpleSavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import androidx.core.os.bundleOf
 import kotlin.math.roundToInt
 
 /**
@@ -125,6 +120,7 @@ object ShortcutsOverlay {
 
     @JvmStatic
     fun toggle(activity: BlenderActivity) {
+        if (!isEnabled) return
         if (isShowing) hide() else show(activity)
     }
 
@@ -155,8 +151,24 @@ object ShortcutsOverlay {
      * window, for the same reason the panel is one: on a NativeActivity the native
      * surface covers the content view.
      */
+    /**
+     * Opt-in switch, so the overlay can be taken out of the picture without a rebuild.
+     *
+     *   adb shell setprop debug.blender.shortcuts 1     # enable
+     *   adb shell setprop debug.blender.shortcuts 0     # disable
+     *
+     * Read on every call rather than cached, so `adb shell setprop` takes effect on
+     * the next focus change without restarting the app.
+     */
+    private val isEnabled: Boolean
+        get() = readFlag("debug.blender.shortcuts", true)
+
+    private fun readFlag(name: String, fallback: Boolean): Boolean =
+        BlenderActivity.systemPropertyInt(name, if (fallback) 1 else 0) != 0
+
     @JvmStatic
     fun installTrigger(activity: BlenderActivity) {
+        if (!isEnabled) return
         if (triggerView != null) return
         val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val density = activity.resources.displayMetrics.density
@@ -261,19 +273,18 @@ object ShortcutsOverlay {
         activity: BlenderActivity,
         content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
     ): ComposeView {
-        val owners = OverlayLifecycleOwner()
-        // ON_CREATE alone is not enough, and the symptom is deceptively narrow: the
-        // Recomposer stays paused below STARTED, so every MutableState still mutates
-        // but nothing recomposes. The trigger button appeared to work because its
-        // action adds a WindowManager window from outside Compose, needing no
-        // recomposition -- while minimize, delete mode, the dropdown and the keyboard
-        // dialog are pure Compose state and did nothing at all.
-        owners.dispatch(Lifecycle.Event.ON_CREATE)
-        owners.dispatch(Lifecycle.Event.ON_START)
-        owners.dispatch(Lifecycle.Event.ON_RESUME)
+        // Two owners, and they are deliberately different. LifecycleOwner is
+        // ProcessLifecycleOwner, which is already RESUMED while the app is in the
+        // foreground and drops on its own when the app is backgrounded. A hand-rolled
+        // registry is the trap: a bare LifecycleRegistry that is only ever sent ON_CREATE
+        // leaves Compose's Recomposer paused below STARTED, so every MutableState still
+        // mutates and nothing ever redraws -- the panel looks alive and responds to
+        // nothing. The saved-state side has no such requirement and gets the trivial
+        // SimpleSavedStateRegistryOwner.
+        val savedStateOwner = SimpleSavedStateRegistryOwner()
         return ComposeView(activity).apply {
-            setViewTreeLifecycleOwner(owners)
-            setViewTreeSavedStateRegistryOwner(owners)
+            setViewTreeLifecycleOwner(ProcessLifecycleOwner.get())
+            setViewTreeSavedStateRegistryOwner(savedStateOwner)
             // Touch handling is per-element inside the composables; the window itself
             // must not be clickable or it swallows events it does not draw.
             isClickable = false
@@ -281,14 +292,12 @@ object ShortcutsOverlay {
             // setter takes an ARGB colour, and PixelFormat.TRANSPARENT is -1-coded as
             // 0xFFFFFFFD, which paints the view near-white. The panel is a rounded
             // Surface over this background, so the rounding let the white show through
-            // as four corner marks. PixelFormat.TRANSPARENT is correct one line below,
-            // as the fifth argument of the LayoutParams, which really is a format.
+            // as four corner marks.
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            // The handler here is a no-op on purpose. newComposeView takes no
-            // dragHandler of its own; the only caller that cares about dragging
-            // (addComposeWindow) ignores this one and substitutes its own, because it
-            // needs to reach the LayoutParams and the view. The trigger button is the
-            // other caller and genuinely does not drag.
+            // The drag handler is a no-op on purpose: newComposeView takes no
+            // dragHandler of its own. addComposeWindow, the only caller that drags,
+            // ignores this one and substitutes its own because it needs the
+            // LayoutParams and the view; the trigger button genuinely does not drag.
             setContent { MaterialTheme { content { _, _ -> } } }
         }
     }
@@ -306,22 +315,6 @@ object ShortcutsOverlay {
         }
     }
 
-    /** Minimal owner for a ComposeView with no Activity behind it. */
-    private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
-        private val lifecycleRegistry = LifecycleRegistry(this)
-        private val savedStateController = SavedStateRegistryController.create(this)
-
-        init {
-            savedStateController.performAttach()
-            savedStateController.performRestore(bundleOf())
-        }
-
-        override val lifecycle: Lifecycle get() = lifecycleRegistry
-        override val savedStateRegistry: SavedStateRegistry
-            get() = savedStateController.savedStateRegistry
-
-        fun dispatch(event: Lifecycle.Event) = lifecycleRegistry.handleLifecycleEvent(event)
-    }
 }
 
 // ---------------------------------------------------------------------------

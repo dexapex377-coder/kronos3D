@@ -25,6 +25,7 @@ import android.text.InputType;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
+import java.lang.reflect.Method;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -34,6 +35,7 @@ import android.view.inputmethod.InputMethodManager;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.lang.reflect.Method;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.zip.ZipEntry;
@@ -98,6 +100,25 @@ public class BlenderActivity extends NativeActivity {
     }
     nativeOnKey(keyCode, KeyEvent.ACTION_DOWN, metaState);
     nativeOnKey(keyCode, KeyEvent.ACTION_UP, metaState);
+  }
+
+  /**
+ * Read an integer Android system property, e.g. one set with
+ * {@code adb shell setprop debug.blender.shortcuts 1}.
+ *
+ * <p>{@code System.getProperty} does not see those: they live in the property
+ * service, not the JVM's. {@code android.os.SystemProperties} is the real API but is
+ * not public SDK, hence the reflection. The rest of this port already uses the
+ * debug.blender.* properties the same way from native code.
+ */
+  static int systemPropertyInt(String key, int fallback) {
+    try {
+      Class<?> systemProperties = Class.forName("android.os.SystemProperties");
+      Method getInt = systemProperties.getMethod("getInt", String.class, int.class);
+      return (int) getInt.invoke(null, key, fallback);
+    } catch (ReflectiveOperationException | RuntimeException e) {
+      return fallback;
+    }
   }
 
   /**
