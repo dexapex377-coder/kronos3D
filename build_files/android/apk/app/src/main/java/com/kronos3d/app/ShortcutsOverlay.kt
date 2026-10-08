@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -82,9 +84,6 @@ import kotlin.math.roundToInt
  * window, not an Activity, so there is no ComponentActivity to inherit from.
  */
 object ShortcutsOverlay {
-
-    /** Width of the panel. Short enough to keep the viewport readable. */
-    private const val PANEL_WIDTH_DP = 230
 
     @Volatile
     private var panelView: View? = null
@@ -185,7 +184,7 @@ object ShortcutsOverlay {
         }
         val windowManager =
             activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        panelView = addComposeWindow(activity, windowManager) { state ->
+        panelView = addComposeWindow(activity, windowManager) {
             ShortcutsPanel(
                 onDismiss = { hide() },
                 onSendKey = { keyCode, meta -> activity.sendShortcutKey(keyCode, meta) },
@@ -340,6 +339,9 @@ object ShortcutsOverlay {
 // Colours. Match the launcher's palette so the two screens do not look like
 // different apps.
 // ---------------------------------------------------------------------------
+
+/** Panel width. Short enough to keep the viewport readable. */
+private const val PANEL_WIDTH_DP = 230
 
 private val PanelBackground = Color(0xF2181B20)
 private val PanelBorder = Color(0xFF2E3543)
@@ -586,7 +588,7 @@ private fun VisualKeyboard(
 }
 
 @Composable
-private fun ModifierKey(
+private fun RowScope.ModifierKey(
     label: String,
     active: Boolean,
     onClick: () -> Unit,
@@ -610,7 +612,7 @@ private fun ModifierKey(
 
 @SuppressLint("ModifierParameter")
 @Composable
-private fun KeyCap(
+private fun RowScope.KeyCap(
     label: String,
     modifier: Modifier = Modifier.weight(1f),
     onClick: () -> Unit,
