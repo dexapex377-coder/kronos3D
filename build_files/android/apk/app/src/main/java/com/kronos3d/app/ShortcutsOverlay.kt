@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.SavedStateRegistry
@@ -315,26 +316,31 @@ object ShortcutsOverlay {
      */
     private class OverlaySavedStateOwner : SavedStateRegistryOwner {
         /**
-         * Declared before [controller] on purpose, and the ordering is load-bearing.
+         * Its own LifecycleRegistry, NOT ProcessLifecycleOwner.
          *
-         * Kotlin initialises properties and init blocks in declaration order, and
-         * SavedStateRegistryController.create() reads owner.lifecycle straight away.
-         * With the controller declared first, lifecycle had not been assigned yet and
-         * create() threw
+         * SavedStateRegistryController.create() builds a Restarter, and a Restarter is
+         * only legal while the owner's lifecycle is between INITIALIZED and CREATED.
+         * ProcessLifecycleOwner is RESUMED whenever the app is foregrounded, so
+         * delegating to it made create() throw
          *
          *   IllegalStateException: Restarter must be created only during owner's
          *   initialization stage
          *
-         * which killed the app on the first frame, from onWindowFocusChanged. Putting
-         * lifecycle first is what OBlender's SimpleSavedStateRegistryOwner does.
+         * and killed the app on the first frame, from onWindowFocusChanged.
+         *
+         * The two lifecycles are separate on purpose. ProcessLifecycleOwner goes to
+         * the view tree, where Compose's Recomposer needs it RESUMED to recompose at
+         * all; this one only has to reach CREATED so the registry can be restored.
+         * Sharing one object cannot satisfy both.
          */
-        override val lifecycle: Lifecycle = ProcessLifecycleOwner.get().lifecycle
+        override val lifecycle: Lifecycle = LifecycleRegistry(this)
 
         private val controller = SavedStateRegistryController.create(this)
 
         init {
             controller.performAttach()
             controller.performRestore(null)
+            (lifecycle as LifecycleRegistry).handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         }
 
         override val savedStateRegistry: SavedStateRegistry
