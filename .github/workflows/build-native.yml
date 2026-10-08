@@ -208,16 +208,20 @@ jobs:
       - name: Restore ccache
         uses: actions/cache/restore@v4
         id: ccache-restore
+        continue-on-error: true
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-android-${{ runner.os }}-${{ github.sha }}
+          key: ccache-android-${{ runner.os }}
           restore-keys: |
             ccache-android-${{ runner.os }}-
 
       - name: Configure ccache
         run: |
           mkdir -p "${{ github.workspace }}/.ccache"
-          ccache -M 30G
+          # GitHub Actions caps a single cache at 10 GB. At 30G the save was
+          # rejected outright, so the next run restored nothing and rebuilt
+          # all of Blender from scratch. 8G leaves room for the archive.
+          ccache -M 8G
           ccache --show-config 2>/dev/null | grep -iE "max_size|compression|compiler_check" | head -6
           ccache --show-stats | head -8
 
@@ -314,7 +318,7 @@ jobs:
         continue-on-error: true
         with:
           path: blender_build_android/build_android_full
-          key: builddir-target-${{ runner.os }}-${{ github.sha }}
+          key: builddir-target-${{ runner.os }}
           restore-keys: |
             builddir-target-${{ runner.os }}-
 
@@ -324,7 +328,7 @@ jobs:
         continue-on-error: true
         with:
           path: blender_build_android/build_host_tools_full
-          key: builddir-host-${{ runner.os }}-${{ github.sha }}
+          key: builddir-host-${{ runner.os }}
           restore-keys: |
             builddir-host-${{ runner.os }}-
 
@@ -340,20 +344,20 @@ jobs:
           bash build_files/android/build_apk.sh full --native-only 2>&1 | tee "$GITHUB_WORKSPACE/build_native.log"
 
       - name: Save ninja build dir (target)
-        if: always()
+        if: always() && steps.cache-builddir-target.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: blender_build_android/build_android_full
-          key: builddir-target-${{ runner.os }}-${{ github.sha }}
+          key: builddir-target-${{ runner.os }}
 
       - name: Save ccache
-        if: always()
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-android-${{ runner.os }}-${{ github.sha }}
+          key: ccache-android-${{ runner.os }}
 
       - name: Show ccache stats
         if: always()
