@@ -6,12 +6,11 @@ package com.kronos3d.app
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.PixelFormat
-import android.os.Bundle
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,20 +18,44 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -42,11 +65,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -59,69 +88,77 @@ import androidx.core.os.bundleOf
 import kotlin.math.roundToInt
 
 /**
- * The floating shortcuts panel: a draggable window that lives above Blender's viewport.
+ * The floating shortcuts panel, its trigger button, the key-combo keyboard and the
+ * shortcut composer, all living in WindowManager windows above Blender's viewport.
  *
  * ## Why a WindowManager window and not addContentView
  *
- * [BlenderActivity] extends `NativeActivity`, which hands its entire surface to
- * `android_main`. A ComposeView added to its content view therefore sits *under* the
- * Vulkan output, and a full-screen one would additionally take every touch away from
- * the viewport: Compose returns true from onTouchEvent on ACTION_DOWN and then owns
- * the whole gesture. A `WindowManager` window is a separate window entirely, so it
- * floats above the native surface and, with [WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL],
- * leaves touches outside its own bounds to the windows underneath.
+ * [BlenderActivity] extends `NativeActivity`, which hands its whole surface to
+ * `android_main`. A view in its content view is drawn *under* the Vulkan output and
+ * never appears. A `WindowManager` window is a separate window, floats above the
+ * native surface, and with [WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL] leaves
+ * every touch outside its own bounds to Blender -- which is what keeps the viewport
+ * usable with the panel open.
+ *
+ * ## Why the panel cannot offset itself
+ *
+ * Dragging adjusts [WindowManager.LayoutParams] x/y, never a `Modifier.offset`. The
+ * panel's window is only as wide as the panel, so a screen-space offset inside it
+ * pushes the content outside its own bounds and it renders as a blank rectangle.
  *
  * ## The lifecycle wiring is not optional
  *
- * A ComposeView created by hand has no LifecycleOwner and no SavedStateRegistryOwner,
- * and it crashes on first composition without them; missing only the saved-state one
- * throws IllegalStateException from onAttachedToWindow instead. A local owner that
- * is both is the smallest thing that works: this is a window, not an Activity, so
- * there is no ComponentActivity to inherit either from. See newComposeView.
+ * A hand-built ComposeView has no LifecycleOwner and no SavedStateRegistryOwner.
+ * Omitting the first crashes on first composition; omitting the second throws
+ * IllegalStateException from onAttachedToWindow. See [newComposeView].
  */
 object ShortcutsOverlay {
 
-    @Volatile
-    private var panelView: View? = null
+    /** Panel width. Short enough to keep the viewport readable. */
+    private const val PANEL_WIDTH_DP = 230
 
-    @Volatile
-    private var keyboardView: View? = null
+    @Volatile private var panelView: View? = null
+    @Volatile private var keyboardView: View? = null
+    @Volatile private var triggerView: View? = null
 
-    @Volatile
-    private var triggerView: View? = null
-
-    /** True while either window is on screen. */
-    val isShowing: Boolean
-        get() = panelView != null || keyboardView != null
+    val isShowing: Boolean get() = panelView != null
 
     @JvmStatic
     fun toggle(activity: BlenderActivity) {
-        if (isShowing) {
-            hide()
-        } else {
-            show(activity)
+        if (isShowing) hide() else show(activity)
+    }
+
+    @JvmStatic
+    fun show(activity: BlenderActivity) {
+        if (isShowing) return
+        val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        panelView = addComposeWindow(activity, wm) { onDrag ->
+            ShortcutsPanel(
+                onDrag = onDrag,
+                onSendCombo = { combo ->
+                    val key = resolveCombo(combo)
+                    activity.sendShortcutKey(key.keyCode, key.meta)
+                },
+                onDismiss = { hide() },
+            )
         }
     }
 
+    @JvmStatic
+    fun hide() {
+        removeWindow(panelView); panelView = null
+        removeWindow(keyboardView); keyboardView = null
+    }
+
     /**
-     * Put the small always-on button that opens the panel.
-     *
-     * This is a WindowManager window rather than a child of the activity's content
-     * view for the same reason the panel is: on a NativeActivity the native surface
-     * is drawn over the content view, so a view added there is invisible. Blender's
-     * own viewport already has a controls strip along the bottom and a header along
-     * the top, so this sits on the right edge, out of both.
-     *
-     * [BlenderActivity] calls this once the surface exists and drops it again when the
-     * activity goes away, so the button does not outlive the window it belongs to.
+     * Put the small always-on button that opens the panel. Also a WindowManager
+     * window, for the same reason the panel is one: on a NativeActivity the native
+     * surface covers the content view.
      */
     @JvmStatic
     fun installTrigger(activity: BlenderActivity) {
-        if (triggerView != null) {
-            return
-        }
-        val windowManager =
-            activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        if (triggerView != null) return
+        val wm = activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val density = activity.resources.displayMetrics.density
         val sizePx = (44 * density).roundToInt()
 
@@ -134,18 +171,12 @@ object ShortcutsOverlay {
                     .clickable { toggle(activity) },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    "K3D",
-                    color = PanelHeader,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                )
+                Text("K3D", color = PanelHeader, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
 
         val params = WindowManager.LayoutParams(
-            sizePx,
-            sizePx,
+            sizePx, sizePx,
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -158,138 +189,38 @@ object ShortcutsOverlay {
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
 
-        runCatching { windowManager.addView(view, params) }
-            .onSuccess { triggerView = view }
-    }
-
-    /**
-     * Build a ComposeView that is safe to hand to the WindowManager.
-     *
-     * Both view-tree owners are mandatory and neither may be omitted: Compose throws
-     * IllegalStateException from onAttachedToWindow if the SavedStateRegistryOwner is
-     * missing, and crashes on first composition if the LifecycleOwner is. Having this
-     * in one place is deliberate -- wiring the two by hand at each call site is how
-     * the trigger button shipped with only one of them.
-     */
-    private fun newComposeView(
-        activity: BlenderActivity,
-        content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
-    ): ComposeView {
-        val owners = OverlayLifecycleOwner()
-        owners.dispatch(Lifecycle.Event.ON_CREATE)
-        return ComposeView(activity).apply {
-            setViewTreeLifecycleOwner(owners)
-            setViewTreeSavedStateRegistryOwner(owners)
-            // Touch handling is per-element inside the composables; the window itself
-            // must not be clickable or it swallows events it does not draw.
-            isClickable = false
-            setBackgroundColor(PixelFormat.TRANSPARENT)
-            setContent {
-                MaterialTheme {
-                    content { _, _ -> }
-                }
-            }
-        }
+        runCatching { wm.addView(view, params) }.onSuccess { triggerView = view }
     }
 
     @JvmStatic
     fun uninstallTrigger() {
-        removeWindow(triggerView)
-        triggerView = null
+        removeWindow(triggerView); triggerView = null
     }
 
-    @JvmStatic
-    fun show(activity: BlenderActivity) {
-        if (isShowing) {
-            return
-        }
-        val windowManager =
-            activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        panelView = addComposeWindow(activity, windowManager) { onDrag ->
-            ShortcutsPanel(
-                onDismiss = { hide() },
-                onSendKey = { keyCode, meta -> activity.sendShortcutKey(keyCode, meta) },
-                onToggleKeyboard = { showKeyboard(activity) },
-                onDrag = onDrag,
-            )
-        }
-    }
-
-    @JvmStatic
-    fun hide() {
-        removeWindow(panelView)
-        panelView = null
-        removeWindow(keyboardView)
-        keyboardView = null
-    }
-
-    /**
-     * The visual keyboard, in its own window so that it can sit at the bottom of the
-     * screen while the panel stays where the user dragged it.
-     */
-    private fun showKeyboard(activity: BlenderActivity) {
-        if (keyboardView != null) {
-            removeWindow(keyboardView)
-            keyboardView = null
-            return
-        }
-        val windowManager =
-            activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        keyboardView = addComposeWindow(
-            activity,
-            windowManager,
-            gravity = Gravity.BOTTOM,
-            heightDp = 260,
-        ) {
-            VisualKeyboard(
-                onDismiss = {
-                    removeWindow(keyboardView)
-                    keyboardView = null
-                },
-                onKey = { keyCode, meta ->
-                    activity.sendShortcutKey(keyCode, meta)
-                },
-            )
-        }
-    }
-
-    /**
-     * Wrap [content] in a ComposeView and put it in a floating window.
-     *
-     * [content] receives a drag handler. Dragging has to move the *window*, not the
-     * composable: the window is only as wide as the panel, so applying a screen-space
-     * offset inside it pushes the content outside its own bounds and it renders as a
-     * blank rectangle.
-     *
-     * [heightDp] null means "wrap content", which is what the panel wants: its window
-     * has to be exactly as tall as the panel or the transparent window would eat
-     * touches below it.
-     */
     private fun addComposeWindow(
         activity: BlenderActivity,
         windowManager: WindowManager,
         gravity: Int = Gravity.TOP or Gravity.START,
+        widthDp: Int = PANEL_WIDTH_DP,
         heightDp: Int? = null,
         content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
     ): View {
         val density = activity.resources.displayMetrics.density
-        val widthPx = (PANEL_WIDTH_DP * density).roundToInt()
+        val widthPx = (widthDp * density).roundToInt()
         val heightPx = heightDp?.let { (it * density).roundToInt() }
 
         val params = WindowManager.LayoutParams(
             widthPx,
             heightPx ?: WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
-            // NOT_TOUCH_MODAL is the load-bearing flag: without it this window would
-            // take every touch on the screen, and the viewport would go dead.
+            // NOT_TOUCH_MODAL is load-bearing: without it this window takes every
+            // touch on the screen and the viewport goes dead.
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSPARENT,
         ).apply {
             x = if (gravity and Gravity.START != 0) {
-                // Default to the right edge with a margin, out of the way of the
-                // touch controls Blender puts on the left.
                 val screenWidth = activity.resources.displayMetrics.widthPixels
                 screenWidth - widthPx - (16 * density).roundToInt()
             } else {
@@ -300,9 +231,9 @@ object ShortcutsOverlay {
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
 
-        // lateinit because the drag handler has to reach the very view it is drawn
-        // into, and that view does not exist until newComposeView returns. The closure
-        // only runs on a later user drag, by which point it is assigned.
+        // lateinit: the drag handler must reach the very view it is drawn into, and
+        // that view only exists once newComposeView returns. The closure runs on a
+        // later user drag, by which point it is assigned.
         lateinit var view: View
         view = newComposeView(activity) { onDrag ->
             content { dx, dy ->
@@ -318,31 +249,45 @@ object ShortcutsOverlay {
         return view
     }
 
-    private fun removeWindow(view: View?) {
-        if (view == null) {
-            return
-        }
-        val windowManager =
-            view.context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        try {
-            windowManager.removeViewImmediate(view)
-        } catch (_: IllegalArgumentException) {
-            // Already detached; nothing to do.
-        } catch (_: WindowManager.BadTokenException) {
-            // The activity's window token died with it, which is the normal case when
-            // a rotation or a backgrounding took the window away first. The view goes
-            // with the token, so there is still nothing left to remove.
+    /**
+     * Build a ComposeView that is safe to hand to the WindowManager.
+     *
+     * Both view-tree owners are mandatory and neither may be dropped: Compose throws
+     * from onAttachedToWindow without the saved-state one, and crashes on first
+     * composition without the lifecycle one. One place for both is deliberate --
+     * wiring them by hand per call site is how the trigger shipped with only one.
+     */
+    private fun newComposeView(
+        activity: BlenderActivity,
+        content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
+    ): ComposeView {
+        val owners = OverlayLifecycleOwner()
+        owners.dispatch(Lifecycle.Event.ON_CREATE)
+        return ComposeView(activity).apply {
+            setViewTreeLifecycleOwner(owners)
+            setViewTreeSavedStateRegistryOwner(owners)
+            // Touch handling is per-element inside the composables; the window itself
+            // must not be clickable or it swallows events it does not draw.
+            isClickable = false
+            setBackgroundColor(PixelFormat.TRANSPARENT)
+            setContent { MaterialTheme { content { _, _ -> } } }
         }
     }
 
-    /**
-     * Minimal LifecycleOwner + SavedStateRegistryOwner for a ComposeView that has no
-     * Activity behind it.
-     *
-     * The saved-state registry is created but never actually used, because the panel
-     * holds no state that must survive a process death; it exists only because Compose
-     * reads it during composition.
-     */
+    private fun removeWindow(view: View?) {
+        if (view == null) return
+        val wm = view.context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        try {
+            wm.removeViewImmediate(view)
+        } catch (_: IllegalArgumentException) {
+            // Already detached.
+        } catch (_: WindowManager.BadTokenException) {
+            // The activity's window token died first, which is the normal case when a
+            // rotation or a backgrounding took the window away. The view goes with it.
+        }
+    }
+
+    /** Minimal owner for a ComposeView with no Activity behind it. */
     private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
         private val lifecycleRegistry = LifecycleRegistry(this)
         private val savedStateController = SavedStateRegistryController.create(this)
@@ -353,69 +298,176 @@ object ShortcutsOverlay {
         }
 
         override val lifecycle: Lifecycle get() = lifecycleRegistry
-
         override val savedStateRegistry: SavedStateRegistry
             get() = savedStateController.savedStateRegistry
 
-        fun dispatch(event: Lifecycle.Event) {
-            lifecycleRegistry.handleLifecycleEvent(event)
-        }
+        fun dispatch(event: Lifecycle.Event) = lifecycleRegistry.handleLifecycleEvent(event)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Colours. Match the launcher's palette so the two screens do not look like
-// different apps.
+// Palette
 // ---------------------------------------------------------------------------
-
-/** Panel width. Short enough to keep the viewport readable. */
-private const val PANEL_WIDTH_DP = 230
 
 private val PanelBackground = Color(0xF2181B20)
 private val PanelBorder = Color(0xFF2E3543)
 private val PanelHeader = Color(0xFF8A99AD)
-private val AccentBlue = Color(0xFF4C8DFF)
+private val CardFace = Color(0xFF222731)
+private val CardBorder = Color(0xFF333D4D)
+private val ChromeFace = Color(0xFF1E293B)
+private val Teal = Color(0xFF00838F)
+private val Amber = Color(0xFFFF9100)
 private val DangerRed = Color(0xFFFF5252)
-private val KeyFace = Color(0xFF262C36)
-private val KeyFacePressed = Color(0xFF3A4657)
-private val KeyLabel = Color(0xFFDCE3EC)
 
 // ---------------------------------------------------------------------------
-// Shortcut model
+// Key model: a keyboard key, and what it sends to Blender
+// ---------------------------------------------------------------------------
+
+enum class KeyType { NORMAL, MODIFIER, ACTION, NUMPAD }
+
+/**
+ * What a key sends: an Android keycode plus a metaState.
+ *
+ * A MODIFIER contributes only [meta]; every other key contributes its [keyCode].
+ */
+private data class AndroidKey(val keyCode: Int = 0, val meta: Int = 0) {
+    val isModifier: Boolean get() = meta != 0
+}
+
+private data class KeyItem(
+    val id: String,
+    val label: String,
+    val weight: Float = 1f,
+    val type: KeyType = KeyType.NORMAL,
+)
+
+/**
+ * Every key the composer can offer, and the Android keycode it maps to.
+ *
+ * These reach Blender through [BlenderActivity.sendShortcutKey], which forwards to
+ * GHOST_SystemAndroid::handleJavaKeyEvent and becomes a real GHOST key event. So a
+ * combo is not a private side-channel that merely looks like a shortcut: it lands in
+ * Blender's own keymap, honours Blender's modifier state, and can be rebound from
+ * Preferences. Android keycodes rather than GLFW because that is what the existing
+ * JNI entry point already converts.
+ */
+private val KEY_TABLE: Map<String, AndroidKey> = buildMap {
+    fun put(id: String, code: Int) = put(id, AndroidKey(code))
+    fun mod(id: String, meta: Int) = put(id, AndroidKey(meta = meta))
+
+    put("esc", KeyEvent.KEYCODE_ESCAPE)
+    put("bksp", KeyEvent.KEYCODE_DEL)
+    put("del", KeyEvent.KEYCODE_FORWARD_DEL)
+    put("tab", KeyEvent.KEYCODE_TAB)
+    put("enter", KeyEvent.KEYCODE_ENTER)
+    put("caps", KeyEvent.KEYCODE_CAPS_LOCK)
+    put("space", KeyEvent.KEYCODE_SPACE)
+    put("backtick", KeyEvent.KEYCODE_GRAVE)
+    put("minus", KeyEvent.KEYCODE_MINUS)
+    put("equals", KeyEvent.KEYCODE_EQUALS)
+    put("bracket_l", KeyEvent.KEYCODE_LEFT_BRACKET)
+    put("bracket_r", KeyEvent.KEYCODE_RIGHT_BRACKET)
+    put("backslash", KeyEvent.KEYCODE_BACKSLASH)
+    put("semicolon", KeyEvent.KEYCODE_SEMICOLON)
+    put("quote", KeyEvent.KEYCODE_APOSTROPHE)
+    put("comma", KeyEvent.KEYCODE_COMMA)
+    put("dot", KeyEvent.KEYCODE_PERIOD)
+    put("slash", KeyEvent.KEYCODE_SLASH)
+    put("left", KeyEvent.KEYCODE_DPAD_LEFT)
+    put("up", KeyEvent.KEYCODE_DPAD_UP)
+    put("down", KeyEvent.KEYCODE_DPAD_DOWN)
+    put("right", KeyEvent.KEYCODE_DPAD_RIGHT)
+
+    for (i in 0..9) put("$i", KeyEvent.KEYCODE_0 + i)
+    for (i in 1..9) put("f$i", KeyEvent.KEYCODE_F1 + (i - 1))
+
+    for (c in 'a'..'z') put(c.toString(), KeyEvent.KEYCODE_A + (c - 'a'))
+
+    // Numpad. Blender's view shortcuts live here (Numpad 1/3/7, Numpad period), which
+    // is the whole point of showing a numpad on the composer.
+    put("np_0", KeyEvent.KEYCODE_NUMPAD_0)
+    for (i in 1..9) put("np_$i", KeyEvent.KEYCODE_NUMPAD_0 + i)
+    put("np_div", KeyEvent.KEYCODE_NUMPAD_DIVIDE)
+    put("np_mul", KeyEvent.KEYCODE_NUMPAD_MULTIPLY)
+    put("np_sub", KeyEvent.KEYCODE_NUMPAD_SUBTRACT)
+    put("np_add", KeyEvent.KEYCODE_NUMPAD_ADD)
+    put("np_dot", KeyEvent.KEYCODE_NUMPAD_DOT)
+    put("np_enter", KeyEvent.KEYCODE_NUMPAD_ENTER)
+
+    mod("shift_l", KeyEvent.META_SHIFT_ON)
+    mod("shift_r", KeyEvent.META_SHIFT_ON)
+    mod("ctrl_l", KeyEvent.META_CTRL_ON)
+    mod("ctrl_r", KeyEvent.META_CTRL_ON)
+    mod("alt_l", KeyEvent.META_ALT_ON)
+    mod("alt_r", KeyEvent.META_ALT_ON)
+}
+
+/** Fold a chosen key combination into the single keycode + metaState pair to send. */
+private fun resolveCombo(ids: List<String>): AndroidKey {
+    var meta = 0
+    var code = 0
+    for (id in ids) {
+        val key = KEY_TABLE[id] ?: continue
+        meta = meta or key.meta
+        // First non-modifier wins; Blender cannot receive two keydowns at once.
+        if (code == 0 && key.keyCode != 0) code = key.keyCode
+    }
+    return AndroidKey(code, meta)
+}
+
+// ---------------------------------------------------------------------------
+// Shortcut model and storage
 // ---------------------------------------------------------------------------
 
 /**
  * One entry in the grid.
  *
- * [id] is a stable string rather than a random UUID: a default of
- * UUID.randomUUID() makes every recomposition produce a new key, so Compose throws
- * the whole list away and re-creates it, and any edit is lost.
+ * [id] is derived from the key combination rather than being a random UUID: a UUID
+ * default makes every recomposition produce a new key, so Compose discards and
+ * recreates the whole list and any edit is lost.
  */
-private data class Shortcut(
-    val id: String,
+private data class GridShortcut(
     val label: String,
-    val keyHint: String,
-    /** Android keycode; dispatched through BlenderActivity.sendShortcutKey. */
-    val keyCode: Int,
-    /** KeyEvent metaState bits, so ctrl/alt shortcuts are distinguishable. */
-    val metaState: Int = 0,
-)
+    val combo: List<String>,
+    val icon: ImageVector = Icons.Default.Star,
+) {
+    val id: String get() = combo.joinToString("+")
+    /** Human-readable combo, e.g. "CTRL+Z", straight from the key ids. */
+    val keyHint: String
+        get() = combo.joinToString("+") { it.uppercase() }.ifEmpty { "sin tecla" }
+}
 
-/** The default grid: things that are awkward with one finger on a phone. */
-private val DEFAULT_SHORTCUTS: List<Shortcut> = listOf(
-    Shortcut("undo", "Undo", "Z", KeyEvent.KEYCODE_Z),
-    Shortcut("redo", "Redo", "Shift+Z", KeyEvent.KEYCODE_Z, KeyEvent.META_SHIFT_ON),
-    Shortcut("delete", "Delete", "Del", KeyEvent.KEYCODE_FORWARD_DEL),
-    Shortcut("duplicate", "Duplicate", "Shift+D", KeyEvent.KEYCODE_D, KeyEvent.META_SHIFT_ON),
-    Shortcut("play", "Play", "Space", KeyEvent.KEYCODE_SPACE),
-    Shortcut("frame_next", "Next Frame", "Down", KeyEvent.KEYCODE_DPAD_DOWN),
-    Shortcut("frame_prev", "Prev Frame", "Up", KeyEvent.KEYCODE_DPAD_UP),
-    Shortcut("view_selected", "Frame Sel", "Numpad .", KeyEvent.KEYCODE_NUMPAD_DOT),
-    Shortcut("top_view", "Top", "Numpad 7", KeyEvent.KEYCODE_NUMPAD_7),
-    Shortcut("front_view", "Front", "Numpad 1", KeyEvent.KEYCODE_NUMPAD_1),
-    Shortcut("right_view", "Right", "Numpad 3", KeyEvent.KEYCODE_NUMPAD_3),
-    Shortcut("toggle_xray", "X-Ray", "Alt+Z", KeyEvent.KEYCODE_Z, KeyEvent.META_ALT_ON),
-)
+/**
+ * Shortcut list, persisted in SharedPreferences.
+ *
+ * Held here rather than in a composable so closing and reopening the panel does not
+ * throw the user's work away, which is what would happen with a bare
+ * `remember { mutableStateListOf() }` inside the panel.
+ */
+private object ShortcutStore {
+    private const val PREFS = "kronos3d.shortcuts"
+    private const val KEY = "list"
+
+    fun load(context: Context): MutableList<GridShortcut> {
+        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY, "") ?: return mutableListOf()
+        return raw.split(';')
+            .filter { it.isNotBlank() }
+            .mapNotNull { entry ->
+                val parts = entry.split('|')
+                if (parts.size != 2) return@mapNotNull null
+                GridShortcut(label = parts[0], combo = parts[1].split('+').filter { it.isNotBlank() })
+            }
+            .toMutableList()
+    }
+
+    fun save(context: Context, shortcuts: List<GridShortcut>) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY, shortcuts.joinToString(";") { "${it.label}|${it.combo.joinToString("+")}" })
+            .apply()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Panel
@@ -423,251 +475,643 @@ private val DEFAULT_SHORTCUTS: List<Shortcut> = listOf(
 
 @Composable
 private fun ShortcutsPanel(
-    onDismiss: () -> Unit,
-    onSendKey: (Int, Int) -> Unit,
-    onToggleKeyboard: () -> Unit,
-    /** Moves the panel's window. Handed in by addComposeWindow. */
     onDrag: (dx: Float, dy: Float) -> Unit,
+    onSendCombo: (List<String>) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    var isMinimized by remember { mutableStateOf(false) }
-    val shortcuts = remember { mutableStateListOf<Shortcut>().apply { addAll(DEFAULT_SHORTCUTS) } }
+    val context = LocalContext.current
 
-    Box(modifier = Modifier.fillMaxWidth()) {
+    var isMinimized by remember { mutableStateOf(false) }
+    var isDeleteMode by remember { mutableStateOf(false) }
+    var showMenuDropdown by remember { mutableStateOf(false) }
+    var showKeyboard by remember { mutableStateOf(false) }
+    var showNameDialog by remember { mutableStateOf(false) }
+    var pendingCombo by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    val selectedKeyIds = remember { mutableStateListOf<String>() }
+    val shortcuts = remember {
+        mutableStateListOf<GridShortcut>().apply {
+            addAll(ShortcutStore.load(context).filter { it.combo.all { k -> KEY_TABLE.containsKey(k) } })
+        }
+    }
+    fun persist() = ShortcutStore.save(context, shortcuts)
+
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = PanelBackground,
+        border = BorderStroke(1.dp, PanelBorder),
+        tonalElevation = 8.dp,
+        modifier = Modifier
+            .width(230.dp)
+            .pointerInput(Unit) {
+                detectDragGestures { change, drag ->
+                    change.consume()
+                    onDrag(drag.x, drag.y)
+                }
+            },
+    ) {
         Column(
-            modifier = Modifier
-                .width(PANEL_WIDTH_DP.dp)
-                .background(PanelBackground, RoundedCornerShape(12.dp))
-                .border(1.dp, PanelBorder, RoundedCornerShape(12.dp))
-                .padding(8.dp),
+            modifier = Modifier.padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // Header doubles as the drag handle. Only this row consumes the gesture,
-            // so dragging the panel cannot fight the buttons below it.
+            // Header doubles as the drag handle, so dragging cannot fight the buttons.
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .pointerInput(Unit) {
-                        detectDragGestures { change, drag ->
-                            change.consume()
-                            onDrag(drag.x, drag.y)
-                        }
-                    },
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = if (isMinimized) "K3D" else "KRONOS SHORTCUTS",
-                    color = PanelHeader,
+                    text = if (isMinimized) "KRONOS"
+                    else if (isDeleteMode) "BORRAR"
+                    else "KRONOS SHORTCUTS",
+                    color = if (isDeleteMode) DangerRed else PanelHeader,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable { isMinimized = !isMinimized },
+                    modifier = Modifier.padding(start = 2.dp),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    HeaderButton("KB") { onToggleKeyboard() }
-                    HeaderButton("✕") { onDismiss() }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (!isMinimized) {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .background(Teal, RoundedCornerShape(6.dp))
+                                .clickable { selectedKeyIds.clear(); showKeyboard = true },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Add,
+                                contentDescription = "New Shortcut",
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp),
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .background(
+                                    if (isDeleteMode) Color(0xFFD32F2F) else CardFace,
+                                    RoundedCornerShape(6.dp),
+                                )
+                                .clickable(enabled = shortcuts.isNotEmpty()) { isDeleteMode = !isDeleteMode },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Delete Mode",
+                                tint = if (isDeleteMode) Color.White else Color(0xFFFF8A80),
+                                modifier = Modifier.size(14.dp),
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .background(CardFace, RoundedCornerShape(6.dp))
+                            .clickable {
+                                isMinimized = !isMinimized
+                                if (isMinimized) {
+                                    isDeleteMode = false
+                                    showMenuDropdown = false
+                                }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            if (isMinimized) Icons.Default.KeyboardArrowDown
+                            else Icons.Default.KeyboardArrowUp,
+                            contentDescription = "Minimize / Maximize",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+
+                    Box(modifier = Modifier.wrapContentSize(Alignment.TopEnd)) {
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .background(CardFace, RoundedCornerShape(6.dp))
+                                .clickable { showMenuDropdown = !showMenuDropdown },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = "Options",
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMenuDropdown,
+                            onDismissRequest = { showMenuDropdown = false },
+                            modifier = Modifier.background(PanelBackground),
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Reset atajos", color = Color.White, fontSize = 11.sp)
+                                },
+                                onClick = {
+                                    showMenuDropdown = false
+                                    shortcuts.clear()
+                                    persist()
+                                },
+                            )
+                        }
+                    }
                 }
             }
 
             if (!isMinimized) {
-                LazyVerticalGrid(
-                    // 2 columns: at 230dp, 3 would leave each card ~66dp, too narrow
-                    // for the labels.
-                    columns = GridCells.Fixed(2),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.height(340.dp),
-                ) {
-                    items(shortcuts, key = { it.id }) { shortcut ->
-                        ShortcutCard(shortcut) {
-                            onSendKey(shortcut.keyCode, shortcut.metaState)
+                Divider(color = PanelBorder, thickness = 1.dp)
+
+                if (shortcuts.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(90.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "Sin atajos creados.\nToca '+' para añadir uno.",
+                            color = Color(0xFF6C7D93),
+                            fontSize = 11.sp,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 230.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        contentPadding = PaddingValues(vertical = 2.dp),
+                    ) {
+                        items(shortcuts, key = { it.id }) { item ->
+                            GridShortcutCard(
+                                item = item,
+                                isDeleteMode = isDeleteMode,
+                                onClick = {
+                                    if (isDeleteMode) {
+                                        shortcuts.remove(item)
+                                        if (shortcuts.isEmpty()) isDeleteMode = false
+                                        persist()
+                                    } else {
+                                        onSendCombo(item.combo)
+                                    }
+                                },
+                            )
                         }
                     }
                 }
+            }
+        }
+    }
 
+    if (showKeyboard) {
+        VisualKeyboard(
+            selectedKeyIds = selectedKeyIds,
+            onKeyToggle = { id ->
+                if (selectedKeyIds.contains(id)) selectedKeyIds.remove(id)
+                else selectedKeyIds.add(id)
+            },
+            onClearAll = { selectedKeyIds.clear() },
+            onConfirm = { combo ->
+                pendingCombo = combo
+                showKeyboard = false
+                showNameDialog = true
+            },
+            onDismiss = { showKeyboard = false },
+        )
+    }
+
+    if (showNameDialog) {
+        SaveShortcutNameDialog(
+            keyCombo = pendingCombo.joinToString("+") { it.uppercase() },
+            onDismiss = { showNameDialog = false },
+            onSave = { name ->
+                shortcuts.add(GridShortcut(label = name, combo = pendingCombo))
+                persist()
+                showNameDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = if (isDeleteMode) Color(0xCCB71C1C) else CardFace,
+        border = BorderStroke(1.dp, if (isDeleteMode) DangerRed else CardBorder),
+        modifier = Modifier.fillMaxWidth().height(36.dp).clickable(onClick = onClick),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(horizontal = 8.dp),
+        ) {
+            Icon(
+                imageVector = if (isDeleteMode) Icons.Default.Clear else item.icon,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(13.dp),
+            )
+            Column(verticalArrangement = Arrangement.Center) {
                 Text(
-                    text = "Teclas reales del keymap: se pueden reasignar en Preferencias.",
-                    color = PanelHeader,
+                    text = item.label,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (isDeleteMode) "Borrar" else item.keyHint,
+                    color = Color(0xFF90A4AE),
                     fontSize = 8.sp,
-                    modifier = Modifier.padding(top = 2.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
     }
 }
 
-@Composable
-private fun HeaderButton(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(width = 26.dp, height = 18.dp)
-            .background(KeyFace, RoundedCornerShape(4.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = KeyLabel, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun ShortcutCard(shortcut: Shortcut, onClick: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .background(KeyFace, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            text = shortcut.label,
-            color = KeyLabel,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(text = shortcut.keyHint, color = AccentBlue, fontSize = 8.sp, maxLines = 1)
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Visual keyboard
+// Composer: pick the keys, then name the shortcut
 // ---------------------------------------------------------------------------
 
 /**
- * A compact QWERTY block plus the modifier row.
+ * Key-combo composer, as a full-screen modal Dialog.
  *
- * Every key is dispatched as an Android keycode through
- * BlenderActivity.sendShortcutKey, so it lands in Blender's keymap and modifier
- * combinations come for free: the modifier row is a held-state latch in this
- * composable, not an Android meta-state modifier, because a floating window cannot
- * receive key events to derive metaState from.
+ * Dialog rather than a second WindowManager window: it brings its own window, and
+ * while it is up the viewport is deliberately inert, which is what you want while
+ * picking a combination.
  */
 @Composable
 private fun VisualKeyboard(
+    selectedKeyIds: List<String>,
+    onKeyToggle: (String) -> Unit,
+    onClearAll: () -> Unit,
+    onConfirm: (List<String>) -> Unit,
     onDismiss: () -> Unit,
-    onKey: (Int, Int) -> Unit,
 ) {
-    var shiftLatch by remember { mutableStateOf(false) }
-    var ctrlLatch by remember { mutableStateOf(false) }
-    var altLatch by remember { mutableStateOf(false) }
-
-    fun metaState(): Int {
-        var meta = 0
-        if (ctrlLatch) meta = meta or KeyEvent.META_CTRL_ON
-        if (altLatch) meta = meta or KeyEvent.META_ALT_ON
-        return meta
+    val keyLookup = remember { mutableStateListOf<Pair<String, String>>() }
+    if (keyLookup.isEmpty()) {
+        ALL_KEY_ITEMS.forEach { keyLookup.add(it.id to it.label) }
     }
+    val lookup = keyLookup.associate { it.first to it.second }
 
-    fun press(keyCode: Int) {
-        onKey(keyCode, metaState())
-        if (shiftLatch) {
-            shiftLatch = false
-        }
-    }
+    val comboString = selectedKeyIds.mapNotNull { lookup[it] }.distinct().joinToString("+")
 
-    Column(
-        modifier = Modifier
-            .background(PanelBackground, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
-            .border(1.dp, PanelBorder, RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
-            .padding(6.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xCC000000))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            ModifierKey("Shift", shiftLatch) { shiftLatch = !shiftLatch }
-            ModifierKey("Ctrl", ctrlLatch) { ctrlLatch = !ctrlLatch }
-            ModifierKey("Alt", altLatch) { altLatch = !altLatch }
-            Spacer(Modifier.weight(1f))
-            ModifierKey("Hide", false, onDismiss)
-        }
-
-        KEY_ROWS.forEach { row ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            Surface(
+                // clickable(enabled=false) keeps taps off the scrim: the outer Box
+                // owns dismissal, the sheet itself must not bubble into it.
+                modifier = Modifier.fillMaxWidth().clickable(enabled = false) {},
+                color = Color(0xFF14171C),
+                shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+                border = BorderStroke(1.dp, Color(0xFF28303D)),
             ) {
-                row.forEach { (label, keyCode) ->
-                    KeyCap(label) { press(keyCode) }
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                "KEY COMBO:",
+                                color = Color(0xFF6C7D93),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            if (selectedKeyIds.isEmpty()) {
+                                Text(
+                                    "Toca teclas para armar combinación...",
+                                    color = Color(0xFF4A5568),
+                                    fontSize = 11.sp,
+                                )
+                            } else {
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    items(
+                                        selectedKeyIds.mapNotNull { lookup[it] }.distinct()
+                                    ) { label ->
+                                        Surface(shape = RoundedCornerShape(4.dp), color = Amber) {
+                                            Text(
+                                                label,
+                                                color = Color.Black,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (selectedKeyIds.isNotEmpty()) {
+                                TextButton(onClick = onClearAll) {
+                                    Text("Limpiar", color = DangerRed, fontSize = 10.sp)
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (selectedKeyIds.isNotEmpty()) Teal else CardFace,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clickable(enabled = selectedKeyIds.isNotEmpty()) {
+                                            onConfirm(selectedKeyIds)
+                                        }
+                                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        "OK",
+                                        color = if (selectedKeyIds.isNotEmpty()) Color.White else Color.Gray,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .background(CardFace, RoundedCornerShape(6.dp))
+                                    .clickable(onClick = onDismiss),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = PanelHeader,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    Divider(color = Color(0xFF222731), thickness = 1.dp)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1.8f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            KEY_ROWS.forEach { row ->
+                                ProportionalKeyRow(
+                                    keys = row,
+                                    selectedKeyIds = selectedKeyIds,
+                                    onKeyToggle = onKeyToggle,
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier.width(1.dp).height(195.dp).background(Color(0xFF222731))
+                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            NUMPAD_ROWS.forEach { row ->
+                                ProportionalKeyRow(
+                                    keys = row,
+                                    selectedKeyIds = selectedKeyIds,
+                                    onKeyToggle = onKeyToggle,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            KeyCap("⌫", Modifier.width(48.dp)) { press(KeyEvent.KEYCODE_DEL) }
-            KeyCap("Tab", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_TAB) }
-            KeyCap("⏎", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_ENTER) }
+@Composable
+private fun RowScope.ProportionalKeyRow(
+    keys: List<KeyItem>,
+    selectedKeyIds: List<String>,
+    onKeyToggle: (String) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        keys.forEach { key ->
+            val isSelected = selectedKeyIds.contains(key.id)
+            val (bg, border, text) = when {
+                isSelected -> Triple(Amber, Color(0xFFFFB74D), Color.Black)
+                key.type == KeyType.MODIFIER -> Triple(ChromeFace, Color(0xFF334155), Color(0xFF93C5FD))
+                key.type == KeyType.ACTION -> Triple(CardFace, Color(0xFF3B4454), Color(0xFFCBD5E1))
+                key.type == KeyType.NUMPAD -> Triple(Color(0xFF1B2430), Color(0xFF2D3748), Color(0xFFE2E8F0))
+                else -> Triple(Color(0xFF20252E), Color(0xFF2E3644), Color(0xFFE2E8F0))
+            }
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = bg,
+                border = BorderStroke(1.dp, border),
+                modifier = Modifier
+                    .weight(key.weight)
+                    .height(30.dp)
+                    .clickable { onKeyToggle(key.id) },
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Text(
+                        text = key.label,
+                        color = text,
+                        fontSize = if (key.label.length > 3) 8.sp else 9.sp,
+                        fontWeight = if (isSelected || key.type == KeyType.MODIFIER) {
+                            FontWeight.Bold
+                        } else {
+                            FontWeight.Medium
+                        },
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun RowScope.ModifierKey(
-    label: String,
-    active: Boolean,
-    onClick: () -> Unit,
+private fun SaveShortcutNameDialog(
+    keyCombo: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .weight(1f)
-            .height(26.dp)
-            .background(if (active) AccentBlue else KeyFace, RoundedCornerShape(5.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            color = if (active) Color.White else KeyLabel,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
+    var name by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = PanelBackground,
+            border = BorderStroke(1.dp, PanelBorder),
+            modifier = Modifier.width(280.dp).padding(8.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    "GUARDAR ATAJO",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("Combinación:", color = PanelHeader, fontSize = 11.sp)
+                    Surface(shape = RoundedCornerShape(4.dp), color = Amber) {
+                        Text(
+                            keyCombo,
+                            color = Color.Black,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    placeholder = { Text("Ej. Extrude Face", fontSize = 11.sp, color = Color(0xFF526070)) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Teal,
+                        unfocusedBorderColor = PanelBorder,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = Teal,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onDismiss) {
+                        Text("Cancelar", color = PanelHeader, fontSize = 11.sp)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Button(
+                        onClick = { if (name.isNotBlank()) onSave(name) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Teal),
+                        shape = RoundedCornerShape(6.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    ) {
+                        Text("Guardar", color = Color.White, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
     }
 }
 
-@SuppressLint("ModifierParameter")
-@Composable
-private fun RowScope.KeyCap(
-    label: String,
-    modifier: Modifier = Modifier.weight(1f),
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = modifier
-            .height(30.dp)
-            .background(KeyFace, RoundedCornerShape(5.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = KeyLabel, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-    }
-}
+// ---------------------------------------------------------------------------
+// Keyboard layout tables
+// ---------------------------------------------------------------------------
 
-/** Three rows of character keys, as Android keycodes. */
-private val KEY_ROWS: List<List<Pair<String, Int>>> = listOf(
+private fun key(id: String, label: String, type: KeyType = KeyType.NORMAL, weight: Float = 1f) =
+    KeyItem(id, label, weight, type)
+
+private val KEY_ROWS: List<List<KeyItem>> = listOf(
     listOf(
-        "1" to KeyEvent.KEYCODE_1, "2" to KeyEvent.KEYCODE_2, "3" to KeyEvent.KEYCODE_3,
-        "4" to KeyEvent.KEYCODE_4, "5" to KeyEvent.KEYCODE_5, "6" to KeyEvent.KEYCODE_6,
-        "7" to KeyEvent.KEYCODE_7, "8" to KeyEvent.KEYCODE_8, "9" to KeyEvent.KEYCODE_9,
-        "0" to KeyEvent.KEYCODE_0,
+        key("esc", "Esc", KeyType.ACTION), key("del", "Del", KeyType.ACTION),
+        key("f1", "F1"), key("f2", "F2"), key("f3", "F3"), key("f4", "F4"), key("f5", "F5"),
+        key("f6", "F6"), key("f7", "F7"), key("f8", "F8"), key("f9", "F9"), key("f10", "F10"),
+        key("f11", "F11"), key("f12", "F12"),
     ),
     listOf(
-        "Q" to KeyEvent.KEYCODE_Q, "W" to KeyEvent.KEYCODE_W, "E" to KeyEvent.KEYCODE_E,
-        "R" to KeyEvent.KEYCODE_R, "T" to KeyEvent.KEYCODE_T, "Y" to KeyEvent.KEYCODE_Y,
-        "U" to KeyEvent.KEYCODE_U, "I" to KeyEvent.KEYCODE_I, "O" to KeyEvent.KEYCODE_O,
-        "P" to KeyEvent.KEYCODE_P,
+        key("backtick", "`"), key("1", "1"), key("2", "2"), key("3", "3"), key("4", "4"),
+        key("5", "5"), key("6", "6"), key("7", "7"), key("8", "8"), key("9", "9"), key("0", "0"),
+        key("minus", "-"), key("equals", "="),
+        key("bksp", "Bksp", KeyType.ACTION, 1.4f),
     ),
     listOf(
-        "A" to KeyEvent.KEYCODE_A, "S" to KeyEvent.KEYCODE_S, "D" to KeyEvent.KEYCODE_D,
-        "F" to KeyEvent.KEYCODE_F, "G" to KeyEvent.KEYCODE_G, "H" to KeyEvent.KEYCODE_H,
-        "J" to KeyEvent.KEYCODE_J, "K" to KeyEvent.KEYCODE_K, "L" to KeyEvent.KEYCODE_L,
+        key("tab", "Tab", KeyType.ACTION, 1.2f),
+        key("q", "Q"), key("w", "W"), key("e", "E"), key("r", "R"), key("t", "T"), key("y", "Y"),
+        key("u", "U"), key("i", "I"), key("o", "O"), key("p", "P"),
+        key("bracket_l", "["), key("bracket_r", "]"), key("backslash", "\\"),
     ),
     listOf(
-        "Z" to KeyEvent.KEYCODE_Z, "X" to KeyEvent.KEYCODE_X, "C" to KeyEvent.KEYCODE_C,
-        "V" to KeyEvent.KEYCODE_V, "B" to KeyEvent.KEYCODE_B, "N" to KeyEvent.KEYCODE_N,
-        "M" to KeyEvent.KEYCODE_M,
+        key("caps", "Caps", KeyType.ACTION, 1.3f),
+        key("a", "A"), key("s", "S"), key("d", "D"), key("f", "F"), key("g", "G"), key("h", "H"),
+        key("j", "J"), key("k", "K"), key("l", "L"),
+        key("semicolon", ";"), key("quote", "'"),
+        key("enter", "Enter", KeyType.ACTION, 1.6f),
+    ),
+    listOf(
+        key("shift_l", "Shift", KeyType.MODIFIER, 1.6f),
+        key("z", "Z"), key("x", "X"), key("c", "C"), key("v", "V"), key("b", "B"),
+        key("n", "N"), key("m", "M"),
+        key("comma", ","), key("dot", "."), key("slash", "/"),
+        key("shift_r", "Shift", KeyType.MODIFIER, 1.6f),
+    ),
+    listOf(
+        key("ctrl_l", "Ctrl", KeyType.MODIFIER, 1.3f),
+        key("alt_l", "Alt", KeyType.MODIFIER, 1.2f),
+        key("space", "Space", weight = 3.5f),
+        key("left", "<-"), key("up", "^"), key("down", "v"), key("right", "->"),
+        key("alt_r", "Alt", KeyType.MODIFIER, 1.2f),
+        key("ctrl_r", "Ctrl", KeyType.MODIFIER, 1.3f),
     ),
 )
+
+private val NUMPAD_ROWS: List<List<KeyItem>> = listOf(
+    listOf(
+        key("np_7", "7", KeyType.NUMPAD), key("np_8", "8", KeyType.NUMPAD),
+        key("np_9", "9", KeyType.NUMPAD), key("np_div", "/", KeyType.NUMPAD),
+    ),
+    listOf(
+        key("np_4", "4", KeyType.NUMPAD), key("np_5", "5", KeyType.NUMPAD),
+        key("np_6", "6", KeyType.NUMPAD), key("np_mul", "*", KeyType.NUMPAD),
+    ),
+    listOf(
+        key("np_1", "1", KeyType.NUMPAD), key("np_2", "2", KeyType.NUMPAD),
+        key("np_3", "3", KeyType.NUMPAD), key("np_sub", "-", KeyType.NUMPAD),
+    ),
+    listOf(
+        key("np_0", "0", KeyType.NUMPAD, 2f), key("np_dot", ".", KeyType.NUMPAD),
+        key("np_add", "+", KeyType.NUMPAD),
+        key("np_enter", "Enter", KeyType.ACTION, 1.3f),
+    ),
+)
+
+private val ALL_KEY_ITEMS: List<KeyItem> = (KEY_ROWS + NUMPAD_ROWS).flatten()

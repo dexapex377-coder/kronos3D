@@ -91,6 +91,11 @@ public class BlenderActivity extends NativeActivity {
    * java_input_mutex_ and drainJavaInput() drops events with no window attached.
    */
   public void sendShortcutKey(int keyCode, int metaState) {
+    if (keyCode == 0) {
+      /* Modifier-only combination. Blender has no standalone modifier key to press,
+       * and sending keyCode 0 would be a key event with no key. */
+      return;
+    }
     nativeOnKey(keyCode, KeyEvent.ACTION_DOWN, metaState);
     nativeOnKey(keyCode, KeyEvent.ACTION_UP, metaState);
   }
