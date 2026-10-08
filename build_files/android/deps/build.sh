@@ -101,6 +101,28 @@ dep_version() {
 }
 
 # Download $2 to $DL_DIR/$1 if missing.
+# Integrity check per compression format. The deps tree mixes 166 .tar.gz, 22 .tar.xz
+# and 9 .tar.bz2, and testing a .bz2 with gzip reports every perfectly good file as
+# corrupt -- so the format has to be picked from the name, not assumed.
+archive_format() {
+  case "$1" in
+    *.tar.gz|*.tgz) echo "gzip" ;;
+    *.tar.xz)       echo "xz" ;;
+    *.tar.bz2)      echo "bzip2" ;;
+    *)              echo "archive" ;;
+  esac
+}
+
+verify_archive() {
+  local file="$1"
+  case "$file" in
+    *.tar.gz|*.tgz) gzip -t "$file" 2>/dev/null ;;
+    *.tar.xz)       xz -t "$file" 2>/dev/null ;;
+    *.tar.bz2)      bzip2 -t "$file" 2>/dev/null ;;
+    *)              return 0 ;;  # Unknown format: do not invent a failure.
+  esac
+}
+
 fetch() {
   local file="$1" url="$2"
   local dest="$DL_DIR/$file"
@@ -109,7 +131,7 @@ fetch() {
   # worse than no download: `if [ ! -f ... ]` kept it forever, and the build then
   # died much later at `gzip: stdin: not in gzip format` or `./configure: No such
   # file or directory`, naming neither the network nor the tarball.
-  if [ -f "$dest" ] && gzip -t "$dest" 2>/dev/null; then
+  if [ -f "$dest" ] && verify_archive "$dest"; then
     return
   fi
   if [ -f "$dest" ]; then
@@ -128,8 +150,8 @@ fetch() {
   fi
 
   # Last line of defence: say which file is bad instead of letting tar complain.
-  if ! gzip -t "$dest" 2>/dev/null; then
-    echo "[deps] ERROR: $file downloaded from $url is not a valid gzip stream" >&2
+  if ! verify_archive "$dest"; then
+    echo "[deps] ERROR: $file downloaded from $url is not a valid $(archive_format "$file") archive" >&2
     echo "[deps]        size=$(stat -c%s "$dest" 2>/dev/null || echo '?')" >&2
     head -c 200 "$dest" | tr -d '\0' >&2 || true
     echo >&2
