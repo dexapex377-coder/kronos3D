@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Build a full Android APK for a given config, end to end:
-#   build_files/android/build_apk.sh [lite|full] [--native-only|--package-only]
+#   build_files/android/build_apk.sh [lite|full] [--native-only|--package-only|--stage-only]
 #
 # Steps: host codegen tools (config-matched) -> cross-compile libblender.so ->
 # package APK. Deps must already be built (build_files/android/deps/build.sh).
@@ -13,18 +13,15 @@
 #   (default)           full pipeline: host tools -> libblender.so -> APK
 #   --native-only       build host tools + libblender.so, skip APK packaging
 #   --package-only      skip native build, only run package.sh (requires prebuilt .so)
+#   --stage-only        skip native build and stop after package.sh has staged the
+#                       libs and payload; Gradle then builds the APK, which is the
+#                       only path that can compile Kotlin/Compose.
 
 set -euo pipefail
 CONFIG="${1:-full}"
-case "$CONFIG" in lite|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only]" >&2; exit 1;; esac
+case "$CONFIG" in lite|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only|--stage-only]" >&2; exit 1;; esac
 MODE="${2:-full}"
-case "$MODE" in --native-only|--package-only|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only]" >&2; exit 1;; esac
-
-set -euo pipefail
-CONFIG="${1:-full}"
-case "$CONFIG" in lite|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only]" >&2; exit 1;; esac
-MODE="${2:-full}"
-case "$MODE" in --native-only|--package-only|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only]" >&2; exit 1;; esac
+case "$MODE" in --native-only|--package-only|--stage-only|full) ;; *) echo "usage: $0 [lite|full] [--native-only|--package-only|--stage-only]" >&2; exit 1;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -69,6 +66,12 @@ fi
 if [ "$MODE" = "--package-only" ]; then
   echo "=== [$CONFIG] package APK only (using prebuilt .so) ==="
   BLENDER_ANDROID_CONFIG="$CONFIG" BUILD="$BUILD" bash "$SCRIPT_DIR/apk/package.sh"
+  exit 0
+fi
+
+if [ "$MODE" = "--stage-only" ]; then
+  echo "=== [$CONFIG] stage only (libs + payload; Gradle owns the APK) ==="
+  BLENDER_ANDROID_CONFIG="$CONFIG" BUILD="$BUILD" bash "$SCRIPT_DIR/apk/package.sh" --stage-only
   exit 0
 fi
 

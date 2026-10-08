@@ -1,56 +1,129 @@
-// SPDX-FileCopyrightText: 2026 Blender Authors
+// SPDX-FileCopyrightText: 2026 Kronos3D Contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Packaging project: consumes the pre-built libblender.so + harvested .so deps
-// and the runtime payload staged by build_files/android/apk/package.sh, and
-// assembles/signs an APK. Run `package.sh` once first to populate the stage.
+// Assembles the Kronos3D APK. Native work is long done: package.sh has staged the
+// stripped libblender.so and its transitive deps into <stage>/lib/arm64-v8a and the
+// runtime payload into <stage>/assets, so this module only merges resources,
+// compiles the Java/Kotlin activities and packages the result.
+//
+// This file used to be dead code, kept alive only by aapt2+javac+d8 in package.sh.
+// It is the Gradle entry point now, which is what makes Kotlin/Compose possible:
+// javac cannot read a .kt file, so the old path could never build one.
 
 plugins {
   id 'com.android.application'
+  id 'org.jetbrains.kotlin.android'
+  id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 // Under the build base: <repo>/../blender_build_android/android_apk_stage_<cfg>.
 // Pick the config with -PblenderConfig=lite|full (default full); must be staged
-// by package.sh first.
+// by package.sh --stage-only first.
 def blenderConfig = project.findProperty('blenderConfig') ?: 'full'
 def stageDir = "${rootDir}/../../../../blender_build_android/android_apk_stage_${blenderConfig}"
 
+// versionName carries a space ("5.3.0 Alpha"), which is why it is quoted here and
+// why it cannot be left to aapt2's --rename-manifest-package path any more.
+def versionName = project.findProperty('blenderVersionName') ?: '5.3.0 Alpha'
+def versionCode = (project.findProperty('blenderVersionCode') ?: '5030001').toInteger()
+
 android {
-  namespace 'org.blender.blender'
+  namespace 'com.kronos3d.app'
   compileSdk 35
-  ndkVersion '28.2.13676358'
 
   defaultConfig {
-    applicationId 'org.blender.blender'
+    applicationId 'com.kronos3d.app'
     minSdk 31
     targetSdk 34
-    versionCode 1
-    versionName '5.3-android'
+
+    versionCode versionCode
+    versionName versionName
+
     ndk { abiFilters 'arm64-v8a' }
   }
 
   sourceSets {
     main {
+      // build_files/android/apk/app/src/main stays the single source of truth for
+      // the manifest, the activities and res/. Only the staged native side comes
+      // from outside the repo.
       manifest.srcFile 'src/main/AndroidManifest.xml'
-      java.srcDirs = ['src/main/java']
-      jniLibs.srcDirs = ["${stageDir}/lib"]
-      assets.srcDirs = ["${stageDir}/assets"]
+      java.srcDirs     = ['src/main/java']
+      res.srcDirs      = ['src/main/res']
+      jniLibs.srcDirs  = ["${stageDir}/lib"]
+      assets.srcDirs   = ["${stageDir}/assets"]
     }
   }
 
+  buildFeatures {
+    compose true
+  }
+
   // libblender.so is huge and already stripped; don't recompress/repack.
-  packagingOptions {
+  // `packaging` rather than the old `packagingOptions`, which AGP 9 removed.
+  packaging {
     jniLibs { useLegacyPackaging = true }
   }
 
-  androidResources { noCompress 'zip' }
+  androidResources { noCompress += 'zip' }
 
   buildTypes {
-    debug { debuggable true }
+    release {
+      // Debug signing: the CI key is throwaway and no store upload exists yet.
+      // Swap for a real signingConfig before distributing outside CI.
+      signingConfig signingConfigs.debug
+    }
+    debug {
+      debuggable true
+      signingConfig signingConfigs.debug
+    }
   }
 
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
   }
+}
+
+kotlin {
+  compilerOptions {
+    jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+  }
+}
+
+dependencies {
+  implementation platform('androidx.compose:compose-bom:2024.02.00')
+  implementation 'androidx.compose.ui:ui'
+  implementation 'androidx.compose.ui:ui-graphics'
+  implementation 'androidx.compose.material3:material3'
+  implementation 'androidx.compose.material:material-icons-extended'
+  implementation 'androidx.activity:activity-compose:1.8.0'
+  implementation 'androidx.core:core-ktx:1.12.0'
+  implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.6.2'
+  implementation 'androidx.lifecycle:lifecycle-process:2.6.2'
+}
+
+// Fail early and legibly when package.sh was not run: without these the module
+// would build a structurally valid APK that crashes on first launch because the
+// native libraries and the runtime payload are simply not there.
+tasks.register('verifyStage') {
+  doLast {
+    def libs = file("${stageDir}/lib/arm64-v8a")
+    def assets = file("${stageDir}/assets")
+    def blenderSo = new File(libs, 'libblender.so')
+    if (!blenderSo.exists()) {
+      throw new GradleException("staged libblender.so missing at ${blenderSo}.\n" +
+        "Run build_files/android/apk/package.sh --stage-only (blenderConfig=${blenderConfig}) first.")
+    }
+    def payload = new File(assets, 'blender_runtime.zip')
+    if (!payload.exists()) {
+      throw new GradleException("staged runtime payload missing at ${payload}.")
+    }
+    logger.lifecycle("staged OK: libblender.so ${blenderSo.length()} B, " +
+      "payload ${payload.length()} B, ${libs.listFiles().length} libs")
+  }
+}
+
+tasks.matching { it.name.startsWith('assemble') }.configureEach {
+  dependsOn 'verifyStage'
 }

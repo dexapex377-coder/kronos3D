@@ -1,20 +1,2 @@
-// SPDX-FileCopyrightText: 2026 Blender Authors
-// SPDX-License-Identifier: GPL-2.0-or-later
-pluginManagement {
-  repositories {
-    google()
-    mavenCentral()
-    gradlePluginPortal()
-  }
-}
-plugins {
-    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.10.0'
-}
-dependencyResolutionManagement {
-  repositories {
-    google()
-    mavenCentral()
-  }
-}
-rootProject.name = "Blender"
-include(":app")
+rootProject.name = 'Kronos3D'
+include ':app'

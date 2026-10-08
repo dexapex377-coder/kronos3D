@@ -1,5 +1,35 @@
-// SPDX-FileCopyrightText: 2026 Blender Authors
-// SPDX-License-Identifier: GPL-2.0-or-later
-plugins {
-  id 'com.android.application' version '8.7.2' apply false
+// Top-level build file. Pins the Android Gradle Plugin and the Kotlin/Compose
+// compiler plugins.
+//
+// Versions match the ones the upstream Blender android branch uses for its own
+// Gradle skeleton (AGP 9.2.0 / Gradle 9.4.1 in gradle/wrapper/gradle-wrapper.properties),
+// so the plugin and the distribution stay on the same compatibility row.
+//
+// The Kotlin plugins are applied here rather than in app/build.gradle because
+// plugin versions must be resolved before the module's own plugins block runs.
+
+buildscript {
+    repositories {
+        mavenCentral()
+        google()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:9.2.0'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.20'
+        // Compose needs its own compiler plugin since Kotlin 2.0; without it the
+        // @Composable functions silently produce a runtime that crashes on first
+        // composition instead of failing at compile time.
+        classpath 'org.jetbrains.kotlin:kotlin-compose-compiler-plugin-embeddable:2.2.20'
+    }
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+        google()
+    }
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
 }

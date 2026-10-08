@@ -6,6 +6,12 @@
 # Package the cross-compiled Blender into an installable APK (no gradle).
 # Gathers libblender.so + its transitive .so deps, compiles BlenderActivity,
 # and assembles a debug-signed APK with the SDK build-tools.
+#
+# With --stage-only, stop after staging: $STAGE/lib/arm64-v8a holds the stripped
+# native libraries and $STAGE/assets the runtime payload, which is exactly the
+# input app/build.gradle declares as jniLibs.srcDirs / assets.srcDirs. Gradle then
+# owns resource merging, Kotlin/Compose compilation and packaging, which the
+# javac+d8 path below cannot do. Everything above that line is unchanged.
 
 set -euo pipefail
 
@@ -15,6 +21,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$REPO_ROOT/build_files/android/env.sh"
 
 CONFIG="${BLENDER_ANDROID_CONFIG:-full}"
+STAGE_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --stage-only) STAGE_ONLY=1 ;;
+    *) echo "usage: $(basename "$0") [--stage-only]" >&2; exit 2 ;;
+  esac
+done
 # Canonical path: CMake records a resolved one, and comparing an unresolved
 # path against it made drop_stale_cache wipe the build dir on every run.
 BUILD_BASE="${BUILD_BASE:-$(cd "$REPO_ROOT/.." && pwd)/blender_build_android}"
@@ -268,6 +281,12 @@ echo "[apk] runtime payload: $(du -sh "$ASSETS/blender_runtime.zip" | cut -f1)"
 # being silently ignored until someone remembers to bump a constant by hand.
 sha256sum "$ASSETS/blender_runtime.zip" | cut -c1-16 > "$ASSETS/blender_runtime.rev"
 echo "[apk] runtime revision: $(cat "$ASSETS/blender_runtime.rev")"
+
+if [ "$STAGE_ONLY" = 1 ]; then
+  echo "[apk] stage-only: staged $JNI and $ASSETS, stopping before aapt2"
+  du -sh "$STAGE"
+  exit 0
+fi
 
 echo "[apk] compiling resources"
 RES_SRC="$SCRIPT_DIR/app/src/main/res"

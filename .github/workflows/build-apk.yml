@@ -258,7 +258,36 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build APK (package.sh only, uses prebuilt .so)
+      - name: Cache Gradle distribution and dependencies
+        id: cache-gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: gradle-9.4.1-agp9.2.0-kotlin2.2.20-composebom2024.02.00-${{ hashFiles('blender/build_files/android/apk/build.gradle', 'blender/build_files/android/apk/app/build.gradle', 'blender/build_files/android/apk/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-9.4.1-agp9.2.0-kotlin2.2.20-composebom2024.02.00-
+
+      # The Gradle distribution is fetched straight from services.gradle.org rather
+      # than through ./gradlew: the wrapper JAR is a Git LFS object, the GitHub LFS
+      # store does not serve it, and package.sh has no reason to care. Downloading
+      # the distribution by URL sidesteps the LFS round trip entirely.
+      - name: Fetch Gradle 9.4.1
+        run: |
+          set -euo pipefail
+          DIST_URL=$(grep -oP 'distributionUrl=\K.*' \
+            blender/build_files/android/apk/gradle/wrapper/gradle-wrapper.properties | sed 's/\\//g')
+          echo "distribution: $DIST_URL"
+          mkdir -p "$HOME/tools"
+          curl -fsSL --retry 3 -o /tmp/gradle.zip "$DIST_URL"
+          unzip -q -o /tmp/gradle.zip -d "$HOME/tools"
+          GRADLE_BIN=$(find "$HOME/tools" -maxdepth 2 -name gradle -type f -path '*/bin/*' | head -1)
+          echo "GRADLE_BIN=$GRADLE_BIN" >> "$GITHUB_ENV"
+          test -x "$GRADLE_BIN"
+          "$GRADLE_BIN" --version | head -12
+
+      - name: Stage native libs and runtime payload (package.sh --stage-only)
         run: |
           set -euo pipefail
           cd blender
@@ -268,13 +297,31 @@ jobs:
           # built with 30, and package.sh needs its llvm-strip/readelf.
           export ANDROID_NDK_VERSION="${{ steps.setup-ndk.outputs.ndk-full-version }}"
           export ANDROID_API=31
-          bash build_files/android/build_apk.sh full --package-only 2>&1 | tee "$GITHUB_WORKSPACE/build_apk.log"
+          bash build_files/android/build_apk.sh full --stage-only 2>&1 | tee "$GITHUB_WORKSPACE/build_apk.log"
+
+      - name: Build APK (Gradle, uses prebuilt .so)
+        run: |
+          set -euo pipefail
+          cd blender/build_files/android/apk
+          export JAVA_HOME="${{ steps.setup-java.outputs.path }}"
+          export ANDROID_HOME="$HOME/android-sdk"
+          # app/build.gradle resolves the stage dir relative to rootDir, and this is
+          # where the two live; the relative path only works from inside the repo.
+          "$GRADLE_BIN" assembleRelease \
+            -PblenderConfig=full \
+            -PblenderVersionName="5.3.0 Alpha" \
+            -PblenderVersionCode=5030001 \
+            --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/gradle.log"
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -1)
+          test -n "$APK"
+          echo "APK: $APK ($(stat -c%s "$APK") bytes)"
+          ls -lh app/build/outputs/apk/release/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: kronos3d-android-apk
-          path: blender_build_android/android_apk_stage_full/blender-full.apk
+          path: blender/build_files/android/apk/app/build/outputs/apk/release/*.apk
           retention-days: 14
           if-no-files-found: error
 
