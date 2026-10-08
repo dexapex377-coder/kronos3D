@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,10 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -178,6 +174,11 @@ object ShortcutsOverlay {
     private fun newComposeView(
         activity: BlenderActivity,
         content: @Composable () -> Unit,
+    ): ComposeView = newComposeView(activity) { _ -> content() }
+
+    private fun newComposeView(
+        activity: BlenderActivity,
+        content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
     ): ComposeView {
         val owners = OverlayLifecycleOwner()
         owners.dispatch(Lifecycle.Event.ON_CREATE)
@@ -190,7 +191,7 @@ object ShortcutsOverlay {
             setBackgroundColor(PixelFormat.TRANSPARENT)
             setContent {
                 MaterialTheme {
-                    content()
+                    content { _, _ -> }
                 }
             }
         }
@@ -209,11 +210,12 @@ object ShortcutsOverlay {
         }
         val windowManager =
             activity.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        panelView = addComposeWindow(activity, windowManager) {
+        panelView = addComposeWindow(activity, windowManager) { onDrag ->
             ShortcutsPanel(
                 onDismiss = { hide() },
                 onSendKey = { keyCode, meta -> activity.sendShortcutKey(keyCode, meta) },
                 onToggleKeyboard = { showKeyboard(activity) },
+                onDrag = onDrag,
             )
         }
     }
@@ -259,6 +261,11 @@ object ShortcutsOverlay {
     /**
      * Wrap [content] in a ComposeView and put it in a floating window.
      *
+     * [content] receives a drag handler. Dragging has to move the *window*, not the
+     * composable: the window is only as wide as the panel, so applying a screen-space
+     * offset inside it pushes the content outside its own bounds and it renders as a
+     * blank rectangle.
+     *
      * [heightDp] null means "wrap content", which is what the panel wants: its window
      * has to be exactly as tall as the panel or the transparent window would eat
      * touches below it.
@@ -268,13 +275,11 @@ object ShortcutsOverlay {
         windowManager: WindowManager,
         gravity: Int = Gravity.TOP or Gravity.START,
         heightDp: Int? = null,
-        content: @Composable () -> Unit,
+        content: @Composable (onDrag: (dx: Float, dy: Float) -> Unit) -> Unit,
     ): View {
         val density = activity.resources.displayMetrics.density
         val widthPx = (PANEL_WIDTH_DP * density).roundToInt()
         val heightPx = heightDp?.let { (it * density).roundToInt() }
-
-        val view = newComposeView(activity, content)
 
         val params = WindowManager.LayoutParams(
             widthPx,
@@ -298,6 +303,20 @@ object ShortcutsOverlay {
             y = (56 * density).roundToInt()
             this.gravity = gravity
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+        }
+
+        // lateinit because the drag handler has to reach the very view it is drawn
+        // into, and that view does not exist until newComposeView returns. The closure
+        // only runs on a later user drag, by which point it is assigned.
+        lateinit var view: View
+        view = newComposeView(activity) { onDrag ->
+            content { dx, dy ->
+                runCatching {
+                    params.x += dx.roundToInt()
+                    params.y += dy.roundToInt()
+                    windowManager.updateViewLayout(view, params)
+                }
+            }
         }
 
         windowManager.addView(view, params)
@@ -412,22 +431,15 @@ private fun ShortcutsPanel(
     onDismiss: () -> Unit,
     onSendKey: (Int, Int) -> Unit,
     onToggleKeyboard: () -> Unit,
+    /** Moves the panel's window. Handed in by addComposeWindow. */
+    onDrag: (dx: Float, dy: Float) -> Unit,
 ) {
-    val configuration = LocalConfiguration.current
-    val density = LocalDensity.current
-    val panelWidthPx = with(density) { PANEL_WIDTH_DP.dp.toPx() }
-    val screenWidthPx = with(density) { configuration.screenWidthDp.dp.toPx() }
-    val marginPx = with(density) { 16.dp.toPx() }
-
-    var offsetX by remember { mutableStateOf(screenWidthPx - panelWidthPx - marginPx) }
-    var offsetY by remember { mutableStateOf(with(density) { 64.dp.toPx() }) }
     var isMinimized by remember { mutableStateOf(false) }
     val shortcuts = remember { mutableStateListOf<Shortcut>().apply { addAll(DEFAULT_SHORTCUTS) } }
 
     Box(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier
-                .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
                 .width(PANEL_WIDTH_DP.dp)
                 .background(PanelBackground, RoundedCornerShape(12.dp))
                 .border(1.dp, PanelBorder, RoundedCornerShape(12.dp))
@@ -442,10 +454,7 @@ private fun ShortcutsPanel(
                     .pointerInput(Unit) {
                         detectDragGestures { change, drag ->
                             change.consume()
-                            offsetX = (offsetX + drag.x)
-                                .coerceIn(marginPx, screenWidthPx - panelWidthPx - marginPx)
-                            offsetY = (offsetY + drag.y)
-                                .coerceIn(marginPx, with(density) { configuration.screenHeightDp.dp.toPx() } - 150f)
+                            onDrag(drag.x, drag.y)
                         }
                     },
                 horizontalArrangement = Arrangement.SpaceBetween,
