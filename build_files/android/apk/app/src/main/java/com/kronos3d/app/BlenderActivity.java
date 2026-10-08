@@ -78,6 +78,36 @@ public class BlenderActivity extends NativeActivity {
   private native void nativeOnKey(int keycode, int action, int metaState);
   private native void nativeOpenMainFile(String path);
 
+  /**
+   * Send a key press/release pair on behalf of the shortcuts overlay.
+   *
+   * <p>{@link #nativeOnKey} is private native, so this is the only door into it from
+   * Kotlin. It routes through GHOST_SystemAndroid::handleJavaKeyEvent, which converts
+   * the Android keycode and pushes a real GHOST_kEventKeyDown/Up: the shortcut lands
+   * in Blender's own keymap, so it is subject to modifiers and can be rebound from
+   * Preferences, exactly like a key on a physical keyboard.
+   *
+   * <p>Safe to call before the surface exists: the native side queues under
+   * java_input_mutex_ and drainJavaInput() drops events with no window attached.
+   */
+  public void sendShortcutKey(int keyCode, int metaState) {
+    nativeOnKey(keyCode, KeyEvent.ACTION_DOWN, metaState);
+    nativeOnKey(keyCode, KeyEvent.ACTION_UP, metaState);
+  }
+
+  /**
+   * Toggle the floating shortcuts panel.
+   *
+   * <p>The panel is a WindowManager window rather than a child of this activity's
+   * content view, because {@code NativeActivity} hands its whole surface to
+   * android_main and a full-screen ComposeView on top would swallow every touch
+   * meant for the viewport. A separate window with FLAG_NOT_TOUCH_MODAL keeps the
+   * rest of the screen with Blender. See ShortcutsOverlay.kt.
+   */
+  public void toggleShortcutsOverlay() {
+    ShortcutsOverlay.toggle(this);
+  }
+
   @Override
   protected void onCreate(Bundle state) {
     /* Runtime files must exist before native Blender init reads them. */
@@ -332,6 +362,16 @@ public class BlenderActivity extends NativeActivity {
      * or a system dialog); re-apply it. */
     if (hasFocus) {
       enterImmersive();
+      /* The shortcuts panel and its trigger are WindowManager windows rather than
+       * views of this activity, so nothing removes them for us: a window manager
+       * outlives the activity that added it and its token dies with it, leaving a
+       * floating button floating over whatever is next. Put them back whenever this
+       * window actually has focus. */
+      ShortcutsOverlay.installTrigger(this);
+    }
+    else {
+      ShortcutsOverlay.hide();
+      ShortcutsOverlay.uninstallTrigger();
     }
   }
 
