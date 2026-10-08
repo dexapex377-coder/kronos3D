@@ -10,9 +10,12 @@
 // It is the Gradle entry point now, which is what makes Kotlin/Compose possible:
 // javac cannot read a .kt file, so the old path could never build one.
 
+// Only the Compose compiler plugin is applied here. AGP 9.0 shipped built-in
+// Kotlin support and hard-fails on 'org.jetbrains.kotlin.android':
+// "The 'org.jetbrains.kotlin.android' plugin is no longer required for Kotlin
+// support since AGP 9.0." Keeping it would be the mistake, not the fix.
 plugins {
   id 'com.android.application'
-  id 'org.jetbrains.kotlin.android'
   id 'org.jetbrains.kotlin.plugin.compose'
 }
 
