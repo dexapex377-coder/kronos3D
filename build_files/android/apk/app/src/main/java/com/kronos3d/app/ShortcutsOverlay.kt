@@ -284,10 +284,12 @@ object ShortcutsOverlay {
             // as four corner marks. PixelFormat.TRANSPARENT is correct one line below,
             // as the fifth argument of the LayoutParams, which really is a format.
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
-            // Pass the handler through rather than substituting a no-op: addComposeWindow
-            // relies on this being the real thing, and a silent no-op here looks
-            // exactly like "the drag does not work".
-            setContent { MaterialTheme { content(onDrag) } }
+            // The handler here is a no-op on purpose. newComposeView takes no
+            // dragHandler of its own; the only caller that cares about dragging
+            // (addComposeWindow) ignores this one and substitutes its own, because it
+            // needs to reach the LayoutParams and the view. The trigger button is the
+            // other caller and genuinely does not drag.
+            setContent { MaterialTheme { content { _, _ -> } } }
         }
     }
 
