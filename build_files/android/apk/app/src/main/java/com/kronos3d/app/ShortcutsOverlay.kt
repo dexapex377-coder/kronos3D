@@ -269,7 +269,13 @@ object ShortcutsOverlay {
             // Touch handling is per-element inside the composables; the window itself
             // must not be clickable or it swallows events it does not draw.
             isClickable = false
-            setBackgroundColor(PixelFormat.TRANSPARENT)
+            // android.graphics.Color.TRANSPARENT, not PixelFormat.TRANSPARENT: this
+            // setter takes an ARGB colour, and PixelFormat.TRANSPARENT is -1-coded as
+            // 0xFFFFFFFD, which paints the view near-white. The panel is a rounded
+            // Surface over this background, so the rounding let the white show through
+            // as four corner marks. PixelFormat.TRANSPARENT is correct one line below,
+            // as the fifth argument of the LayoutParams, which really is a format.
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
             setContent { MaterialTheme { content { _, _ -> } } }
         }
     }
@@ -501,25 +507,21 @@ private fun ShortcutsPanel(
         color = PanelBackground,
         border = BorderStroke(1.dp, PanelBorder),
         tonalElevation = 8.dp,
-        modifier = Modifier
-            .width(230.dp)
-            .pointerInput(Unit) {
-                detectDragGestures { change, drag ->
-                    change.consume()
-                    onDrag(drag.x, drag.y)
-                }
-            },
+        modifier = Modifier.width(230.dp),
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // Header doubles as the drag handle, so dragging cannot fight the buttons.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // The title is the drag handle, and only the title: a pointerInput on
+                // the row would swallow taps on the +/delete/minimize/overflow buttons
+                // sitting right next to it, and on the Surface it swallowed every tap
+                // in the panel, leaving it inert.
                 Text(
                     text = if (isMinimized) "KRONOS"
                     else if (isDeleteMode) "BORRAR"
@@ -527,7 +529,14 @@ private fun ShortcutsPanel(
                     color = if (isDeleteMode) DangerRed else PanelHeader,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 2.dp),
+                    modifier = Modifier
+                        .padding(start = 2.dp)
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, drag ->
+                                change.consume()
+                                onDrag(drag.x, drag.y)
+                            }
+                        },
                 )
 
                 Row(
