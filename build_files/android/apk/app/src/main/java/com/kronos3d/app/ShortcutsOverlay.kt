@@ -54,7 +54,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
@@ -79,9 +78,10 @@ import kotlin.math.roundToInt
  * ## The lifecycle wiring is not optional
  *
  * A ComposeView created by hand has no LifecycleOwner and no SavedStateRegistryOwner,
- * and it crashes on first composition without them. [ProcessLifecycleOwner] plus a
- * local [SavedStateRegistryOwner] is the smallest thing that works; the panel is a
- * window, not an Activity, so there is no ComponentActivity to inherit from.
+ * and it crashes on first composition without them; missing only the saved-state one
+ * throws IllegalStateException from onAttachedToWindow instead. A local owner that
+ * is both is the smallest thing that works: this is a window, not an Activity, so
+ * there is no ComponentActivity to inherit either from. See newComposeView.
  */
 object ShortcutsOverlay {
 
@@ -129,26 +129,21 @@ object ShortcutsOverlay {
         val density = activity.resources.displayMetrics.density
         val sizePx = (44 * density).roundToInt()
 
-        val view = ComposeView(activity).apply {
-            setViewTreeLifecycleOwner(ProcessLifecycleOwner.get())
-            setContent {
-                MaterialTheme {
-                    Box(
-                        modifier = Modifier
-                            .size(sizePx.dp)
-                            .background(PanelBackground, RoundedCornerShape(10.dp))
-                            .border(1.dp, PanelBorder, RoundedCornerShape(10.dp))
-                            .clickable { toggle(activity) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            "K3D",
-                            color = PanelHeader,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                }
+        val view = newComposeView(activity) {
+            Box(
+                modifier = Modifier
+                    .size(sizePx.dp)
+                    .background(PanelBackground, RoundedCornerShape(10.dp))
+                    .border(1.dp, PanelBorder, RoundedCornerShape(10.dp))
+                    .clickable { toggle(activity) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "K3D",
+                    color = PanelHeader,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
         }
 
@@ -169,6 +164,36 @@ object ShortcutsOverlay {
 
         runCatching { windowManager.addView(view, params) }
             .onSuccess { triggerView = view }
+    }
+
+    /**
+     * Build a ComposeView that is safe to hand to the WindowManager.
+     *
+     * Both view-tree owners are mandatory and neither may be omitted: Compose throws
+     * IllegalStateException from onAttachedToWindow if the SavedStateRegistryOwner is
+     * missing, and crashes on first composition if the LifecycleOwner is. Having this
+     * in one place is deliberate -- wiring the two by hand at each call site is how
+     * the trigger button shipped with only one of them.
+     */
+    private fun newComposeView(
+        activity: BlenderActivity,
+        content: @Composable () -> Unit,
+    ): ComposeView {
+        val owners = OverlayLifecycleOwner()
+        owners.dispatch(Lifecycle.Event.ON_CREATE)
+        return ComposeView(activity).apply {
+            setViewTreeLifecycleOwner(owners)
+            setViewTreeSavedStateRegistryOwner(owners)
+            // Touch handling is per-element inside the composables; the window itself
+            // must not be clickable or it swallows events it does not draw.
+            isClickable = false
+            setBackgroundColor(PixelFormat.TRANSPARENT)
+            setContent {
+                MaterialTheme {
+                    content()
+                }
+            }
+        }
     }
 
     @JvmStatic
@@ -249,22 +274,7 @@ object ShortcutsOverlay {
         val widthPx = (PANEL_WIDTH_DP * density).roundToInt()
         val heightPx = heightDp?.let { (it * density).roundToInt() }
 
-        val lifecycleOwner = OverlayLifecycleOwner()
-        lifecycleOwner.dispatch(Lifecycle.Event.ON_CREATE)
-
-        val view = ComposeView(activity).apply {
-            setViewTreeLifecycleOwner(lifecycleOwner)
-            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
-            // Touch handling is per-element inside the composables; the window itself
-            // must not be clickable or it swallows events it does not draw.
-            isClickable = false
-            setBackgroundColor(PixelFormat.TRANSPARENT)
-            setContent {
-                MaterialTheme {
-                    content()
-                }
-            }
-        }
+        val view = newComposeView(activity, content)
 
         val params = WindowManager.LayoutParams(
             widthPx,
@@ -304,6 +314,10 @@ object ShortcutsOverlay {
             windowManager.removeViewImmediate(view)
         } catch (_: IllegalArgumentException) {
             // Already detached; nothing to do.
+        } catch (_: WindowManager.BadTokenException) {
+            // The activity's window token died with it, which is the normal case when
+            // a rotation or a backgrounding took the window away first. The view goes
+            // with the token, so there is still nothing left to remove.
         }
     }
 
