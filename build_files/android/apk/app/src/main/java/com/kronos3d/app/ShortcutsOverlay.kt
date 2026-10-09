@@ -63,7 +63,6 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -1154,7 +1153,6 @@ private fun GridShortcutCard(
  */
 @Composable
 private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
-    var lastY by remember { mutableFloatStateOf(0f) }
     Surface(
         shape = RoundedCornerShape(6.dp),
         color = Color(0xFF1E242E),
