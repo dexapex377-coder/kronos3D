@@ -1171,7 +1171,7 @@ private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
                     ) { change, amount ->
                         change.consume()
                         lastY += amount.y
-                        onDragDelta(with(this) { amount.y.toDp().value.toInt() })
+                        onDragDelta(amount.y)
                     }
                 },
             contentAlignment = Alignment.Center,
@@ -1384,8 +1384,12 @@ Box(
                                     /* dyDp, not dyPx: toDp() needs a Density receiver and
                                      * this composable scope has one, the plain callback does
                                      * not. */
-                                    onDragDelta = { dyDp ->
-                                        dragOffset.value = (dragOffset.value + dyDp.dp)
+                                    /* dyPx: la conversion a dp ocurre aqui, dentro de un
+                                     * scope que tiene Density. toDp() no es una extension
+                                     * top-level, es miembro de Density, y por eso no puede
+                                     * usarse dentro de la lambda simple del handle. */
+                                    onDragDelta = { dyPx ->
+                                        dragOffset.value = (dragOffset.value + dyPx.toDp())
                                             .coerceIn(minDrag, maxDrag)
                                     },
                                 )
