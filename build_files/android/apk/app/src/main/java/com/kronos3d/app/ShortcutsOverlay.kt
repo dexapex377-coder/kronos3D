@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,6 +88,7 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Density
 
 /**
  * The floating shortcuts panel, its trigger button, the key-combo keyboard and the
@@ -1152,7 +1154,7 @@ private fun GridShortcutCard(
  * the only way to move the sheet and it has to be grabbable with a thumb.
  */
 @Composable
-private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
+private fun KeyboardNudge(density: Density, onDragDelta: (Float) -> Unit) {
     Surface(
         shape = RoundedCornerShape(6.dp),
         color = Color(0xFF1E242E),
@@ -1168,7 +1170,7 @@ private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
                         onDragCancel = { },
                     ) { change, amount ->
                         change.consume()
-                        onDragDelta(amount.y)
+                        onDragDelta(with(density) { amount.y.toDp().value })
                     }
                 },
             contentAlignment = Alignment.Center,
