@@ -647,7 +647,7 @@ private fun ShortcutsPanel(
         color = PanelBackground,
         border = BorderStroke(1.dp, PanelBorder),
         tonalElevation = 8.dp,
-        modifier = Modifier.width(230.dp),
+        modifier = Modifier.width(420.dp),
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
@@ -965,40 +965,37 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
             broken -> Color(0xFFCC8800)
             else -> CardBorder
         }),
-        modifier = Modifier.fillMaxWidth().height(36.dp).clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().height(38.dp).clickable(onClick = onClick),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.padding(horizontal = 8.dp),
+        /* Five columns leaves roughly 78 dp per tile, and the old layout spent 35 dp on
+         * padding, icon and spacing before the first character. The label then measured
+         * zero width and every card rendered as just its star. */
+        Column(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 2.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Icon(
-                imageVector = if (isDeleteMode) Icons.Default.Clear else item.icon,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(13.dp),
+            Text(
+                text = item.label,
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
             )
-            Column(verticalArrangement = Arrangement.Center) {
-                Text(
-                    text = item.label,
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = when {
-                        isDeleteMode -> "Borrar"
-                        broken -> "Sin mapear: " + unmappable.joinToString("+")
-                        else -> item.keyHint
-                    },
-                    color = if (broken) Color(0xFFCC8800) else Color(0xFF90A4AE),
-                    fontSize = 8.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = when {
+                    isDeleteMode -> "Borrar"
+                    broken -> "Sin mapear"
+                    else -> item.keyHint
+                },
+                color = if (broken) Color(0xFFCC8800) else Color(0xFF90A4AE),
+                fontSize = 7.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
