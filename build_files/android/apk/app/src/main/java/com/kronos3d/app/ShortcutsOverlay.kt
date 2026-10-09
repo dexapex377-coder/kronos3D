@@ -1171,7 +1171,7 @@ private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
                     ) { change, amount ->
                         change.consume()
                         lastY += amount.y
-                        onDragDelta(amount.y)
+                        onDragDelta(with(this) { amount.y.toDp().value.toInt() })
                     }
                 },
             contentAlignment = Alignment.Center,
@@ -1381,8 +1381,11 @@ Box(
                                  * para mover a pasos o mantener pulsado y arrastrar, que es lo
                                  * que hace falta para recolocar el teclado de una vez. */
                                 KeyboardNudge(
-                                    onDragDelta = { dyPx ->
-                                        dragOffset.value = (dragOffset.value + dyPx.toDp())
+                                    /* dyDp, not dyPx: toDp() needs a Density receiver and
+                                     * this composable scope has one, the plain callback does
+                                     * not. */
+                                    onDragDelta = { dyDp ->
+                                        dragOffset.value = (dragOffset.value + dyDp.dp)
                                             .coerceIn(minDrag, maxDrag)
                                     },
                                 )
