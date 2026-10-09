@@ -53,7 +53,10 @@ jobs:
           # the verification step below is what actually gates the build.
           git lfs fetch upstream-lfs --include "$INCLUDE" \
             || echo "::warning::some LFS objects unavailable; continuing"
-          git lfs pull --include "$INCLUDE"
+          # Same reason as the fetch above: the pull exits non-zero over the objects that
+          # do not exist, which would abort before the build starts.
+          git lfs pull --include "$INCLUDE" \
+            || echo "::warning::some LFS objects unavailable; continuing"
           echo "LFS files resolved."
 
       - name: Verify resolved LFS files (gradle wrapper, launcher icons, startup.blend)
