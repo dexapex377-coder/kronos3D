@@ -1380,15 +1380,12 @@ Box(
                                  * para mover a pasos o mantener pulsado y arrastrar, que es lo
                                  * que hace falta para recolocar el teclado de una vez. */
                                 KeyboardNudge(
-                                    /* dyDp, not dyPx: toDp() needs a Density receiver and
-                                     * this composable scope has one, the plain callback does
-                                     * not. */
-                                    /* dyPx: la conversion a dp ocurre aqui, dentro de un
-                                     * scope que tiene Density. toDp() no es una extension
-                                     * top-level, es miembro de Density, y por eso no puede
-                                     * usarse dentro de la lambda simple del handle. */
-                                    onDragDelta = { dyPx ->
-                                        dragOffset.value = (dragOffset.value + dyPx.toDp())
+                                    /* toDp() es miembro de Density, no una extension
+                                     * top-level: la lambda del handle no lo tiene en scope,
+                                     * asi que se le pasa la Density del composable. */
+                                    density = LocalDensity.current,
+                                    onDragDelta = { dyDp ->
+                                        dragOffset.value = (dragOffset.value + dyDp.dp)
                                             .coerceIn(minDrag, maxDrag)
                                     },
                                 )
