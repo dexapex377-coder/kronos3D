@@ -1163,12 +1163,11 @@ private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
                 .size(width = 40.dp, height = 34.dp)
                 .pointerInput(Unit) {
                     detectDragGestures(
-                        onDragStart = { lastY = it.y },
+                        onDragStart = { },
                         onDragEnd = { },
                         onDragCancel = { },
                     ) { change, amount ->
                         change.consume()
-                        lastY += amount.y
                         onDragDelta(amount.y)
                     }
                 },
