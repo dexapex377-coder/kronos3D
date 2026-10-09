@@ -86,7 +86,6 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.roundToPx
 
 /**
  * The floating shortcuts panel, its trigger button, the key-combo keyboard and the
@@ -1063,7 +1062,7 @@ Box(
                 // owns dismissal, the sheet itself must not bubble into it.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset { IntOffset(0, dragOffset.roundToPx()) }
+                    .offset { IntOffset(0, dragOffset.toPx().roundToInt()) }
                     .clickable(enabled = false) {},
                 color = Color(0xFF14171C),
                 shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
