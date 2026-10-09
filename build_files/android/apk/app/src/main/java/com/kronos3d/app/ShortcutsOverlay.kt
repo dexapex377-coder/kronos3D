@@ -675,7 +675,6 @@ private fun ShortcutsPanel(
     var typingMode by remember { mutableStateOf(false) }
 
     val latchedMeta = remember { mutableStateOf(0) }
-    var latchedKeyCode by remember { mutableIntStateOf(0) }
     var latchedCombo by remember { mutableStateOf<List<String>>(emptyList()) }
 
     fun metaOfCombo(combo: List<String>): Int =
@@ -937,13 +936,15 @@ private fun ShortcutsPanel(
                 if (typingMode) {
                     val meta = metaOfCombo(listOf(id))
                     val key = KEY_TABLE[id]
+                    val code = key?.code ?: 0
+                    val metaOnly = key == null || key.meta != 0
                     when {
                         id == "bksp" || id == "del" -> onBackspace()
                         /* A lone modifier has no character of its own. As a keycode it is
                          * meaningless to a text field, and keyCode 0 is dropped natively,
                          * so the best a lone Shift can do is nothing. */
-                        key == null || key.meta != 0 -> Unit
-                        key.code == KeyEvent.KEYCODE_SPACE -> onTypeText(" ")
+                        metaOnly -> Unit
+                        code == KeyEvent.KEYCODE_SPACE -> onTypeText(" ")
                         else -> onTypeText(keyLabel(id).orEmpty())
                     }
                 } else {
@@ -1164,10 +1165,11 @@ private fun VisualKeyboard(
     var dragOffset by remember { mutableStateOf(0.dp) }
     var dragStart by remember { mutableStateOf(0.dp) }
     val maxDrag = 160.dp
+    val minDrag = (-160).dp
     /* Las flechas mueven exactamente el mismo offset que el handle de arrastre: mismo
      * mecanismo, stepped en lugar de continuo. Se anula al tocar cualquier tecla para que
      * escribir no requiera mover el teclado antes. */
-    val nudgeBy: (Int) -> Unit = { dp -> dragOffset = (dragOffset.value + dp.dp).coerceIn(-maxDrag, maxDrag) }
+    val nudgeBy: (Int) -> Unit = { dp -> dragOffset = (dragOffset + dp.dp).coerceIn(minDrag, maxDrag) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1260,7 +1262,7 @@ Box(
                                             onDragCancel = { dragOffset = 0.dp },
                                         ) { change, amount ->
                                             change.consume()
-                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(-maxDrag, maxDrag)
+                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(minDrag, maxDrag)
                                         }
                                     },
                                 contentAlignment = Alignment.Center,
