@@ -1,0 +1,72 @@
+# What Is New in This Build
+
+A plain language summary of everything this fork changed on top of the original
+Blender for Android port. The full technical list, with commit hashes, is in
+ANDROID_CHANGELOG.md.
+
+| Type | Change | What it means for you |
+| --- | --- | --- |
+| New | Audio playback | Sound from the timeline, sound strips and speaker objects now plays through the phone, wired headphones or the current Android output instead of staying silent. This is available in the full build; the smaller lite build still leaves audio out. Changing the output while Blender is open -- unplugging headphones or connecting Bluetooth, for example -- can stop playback until you change an audio preference and Blender opens the device again; automatic reconnection is not built yet. |
+| Fixed | Cut-off tooltips | The little description that appears when you hold a button was drawn in a box too narrow for it, so the text ran out of the right-hand edge mid-word. The box is measured properly now and the whole description fits. |
+| Fixed | Tool variants with a finger | Holding a tool in the toolbar now opens its variants -- Select Box holding Circle and Lasso, and every other tool with the little corner mark -- instead of the "Add to Quick Favorites" menu. There was no way to reach them with a finger at all before. Slide to the one you want and lift. The trade is that those buttons no longer offer their right-click menu to a finger; a stylus still gets it with the side button. |
+| Adjusted | Easier to grab an editor border | The border between two editors can be caught from about half again as far away, so dragging one to resize it takes fewer tries with a finger. The trade is that something drawn right against a border cannot be tapped, since the press moves the border instead. |
+| Fixed | Reopening a closed side panel with a finger | The little arrow that brings a closed side panel back is half again as large, and a finger press on it is no longer pulled onto the editor border beside it -- which is why it only ever worked with a mouse or a stylus. Tap it and the panel's edge comes alive, then drag to size it. |
+| Fixed | Cramped splash screen and About box | The splash screen was drawn with its type too big for the box it was given, so "New File" and "Recent Files" crowded together and file names were cut short. The box now takes the width it was designed for, and its rows have the same spacing as every other menu in the app rather than being the one list drawn tighter than its neighbours. It stays inside the screen edges upright and top to bottom with the phone turned. The About box got the same treatment. |
+| Fixed | The VRAM figure was impossible | The status bar claimed 14.8 GiB of video memory on a phone sold with 12 GB. There is no separate video memory on a phone, and Blender was adding together all of system memory and a second, protected block reserved for DRM-playback that it can never touch. It now shows what Blender can really allocate -- about 8.7 GB here -- and the Cycles device panel shows the same three figures side by side: what the phone was fitted with, what the system kept, and what is left for Blender. |
+| Fixed | Errors after allowing online access | Turning on "Allow Online Access" used to fill the report banner with two red errors about a missing `_asset-library-meta.json`. Blender was trying to download its Online Essentials asset library, which cannot work on Android at all -- the downloader needs a kind of background process the system does not provide. Remote asset libraries are now switched off here, quietly, instead of failing. Get Extensions is unaffected and still downloads and installs normally. |
+| Fixed | The keyboard button sliding away | The button that opens the on-screen keyboard stays at the far left of the status bar. Dragging the bar sideways to read the memory, VRAM and scene figures used to carry the button off the edge with them, and turning on more figures made it worse. The figures still scroll; the button no longer moves, upright or turned. The memory and version figures sit at the right end of the bar, with the mouse and shortcut hints kept apart at the left, the way they were before the button moved. They also stay put: they used to jump sideways whenever the hints appeared or vanished under your finger, which made dragging the bar feel like it lost its place. |
+| Changed | Back button in the top bar | The button that leaves a maximized editor shows only its icon when the phone is upright, where there was no room for the words, and shows the label again with the phone turned. |
+| Fixed | Pickers cut off at the screen edge | Tapping a field that opens a list — an IK Target, an object or material picker — used to run the list off the top of the screen when the field was near the top of the panel. It now opens on whichever side of the field has room, sized to that room, and never on top of the field itself. |
+| New | Scrolling the search results | Drag the results of the F3 search with a finger, a stylus or the mouse button held down, and the list follows your hand. Letting go after a drag does not pick anything; a plain tap picks exactly the row you touched, which it did not always do before. The mouse wheel and the arrow keys work as they always have. |
+| Fixed | Search hidden behind the keyboard | The search that opens with F3 used to appear under the on-screen keyboard, over the keys you were about to type with. It now sits above it, and shows as many results as actually fit — ten upright, six with the phone turned, always at full size rather than squeezed. The same applies when Blender is sharing the screen with another app. |
+| Fixed | Cramped search boxes | The search that opens with F3, and every other search field, had its rows squeezed to about two thirds their proper height, text crowding its own lines. They now match the rows of any other menu. |
+| New | Shift shows what it will type | Press Shift on the on-screen keyboard and the keys that have a second character swap to it, in blue: the number row becomes the symbols, and the brackets and punctuation show what they will give. Letters stay as they are, because Shift on Q is still Q. |
+| New | Caps on the keyboard | A Caps key before A, for typing a run of capitals. Shift on its own clears after one letter; Caps stays on until you tap it again or close the keyboard, and only affects letters. |
+| New | F keys and brackets on the keyboard | The on-screen keyboard has a top row with Esc and F1 to F12, so renaming with F2, searching with F3, reopening the last operation with F9 and rendering with F12 all work. It also has `[ ] \` and `; '` now, which a script cannot be written without. Upright, the extra row makes every key a little shorter without the keyboard taking more of the screen, and the keys are drawn flat instead of moulded. |
+| New | Add Workspace | The folded top bar menu ends with Add Workspace, the "+" that sat at the end of the tab strip on a desktop. Without it there was no way to make a new workspace on a phone at all. |
+| Fixed | Links that did nothing | Tapping a link anywhere in Blender now opens your browser: the splash screen, the About box, the manual and community buttons in Preferences, and "Online Manual" when you press and hold a setting. None of them did anything before, and none of them said why. Add-on links work too. |
+| Fixed | The Register button that only gave an error | Preferences had an "Operating System Settings" panel whose Register button always failed with a message about xdg-mime. The panel is gone. It was for desktop Linux and Windows, where an app can claim a file type at runtime; on Android that is decided when the app is built, and tapping a .blend already offers Blender. |
+| New | Open a .blend by tapping it | Tap a .blend in your file manager and it opens in Blender, in My Files without even asking. If Blender is already running the file loads into it rather than starting a second copy. Two things to know. Blender now also shows up in the "Open with" list of other files that are not pictures, music or video — .zip and .pdf and the like — because Android gives a file manager no way to tell it apart; pictures, music and video are never affected. And a file stored somewhere the app cannot reach directly, such as a cloud folder with nothing downloaded, opens as a copy: it will be missing its textures, and saving writes to a temporary place, so save those somewhere of your own. |
+| New | Device information | Preferences shows what your phone actually is under Cycles Render Devices: the model, the processor, the GPU, how many cores and how much memory. The single "None" button meant no graphics card, not no hardware. |
+| Fixed | Cramped context menus | Right-click menus on sliders and headers were drawn with their rows squashed together. They now match every other menu. |
+| New | Bigger menus | Headers, menus and tool bars are drawn half again as large, so a thumb can hit them. The 3D view and the rest of your work area keep the size they had. There is a Menu Scale slider next to Resolution Scale if you want more or less. |
+| New | One menu button | The top bar is a single button holding File, Edit, Render, Window, Help and every workspace. Held upright the old bar had room for almost none of it. |
+| New | Undo and redo buttons | Two buttons in the top bar, so undo does not mean opening the keyboard to hold Ctrl. |
+| New | Scrolling long menus | A menu taller than the screen can be dragged with a finger, or stepped by tapping the arrows at its edge. Dialogs too. |
+| Changed | Sticky Ctrl, Shift and Alt | Tap one on the keyboard and it stays on until you tap it again, so Shift and a tap add to a selection and Ctrl with + or - grows and shrinks one. Two or three can be on at once. |
+| Changed | Save prompt upright | The Save, Don't Save and Cancel buttons sit one above the other when the phone is upright, instead of Save falling off the edge. |
+| Fixed | A stuck Ctrl or Alt | The app could reach a state where nothing could be clicked and only the top menu worked. A modifier left held by a gesture is now released, and opening the keyboard clears any that is. |
+| New | On-screen keyboard | A keyboard drawn inside Blender, opened from the status bar. It types into any field without closing it and fires shortcuts, Ctrl and Shift combinations included, which the phone keyboard cannot send. |
+| New | Denoiser | Cycles renders come out clean instead of grainy, without waiting for extra samples. |
+| New | Internet access | The app can reach the internet, so the Get Extensions panel lists and installs add ons. |
+| New | pip included | Add ons that need extra Python packages can install them. |
+| New | Fluid simulation | Smoke, fire and liquid simulations work. |
+| New | Motion tracking | Camera and object tracking are available. |
+| New | Ocean modifier | The ocean surface generator works. |
+| New | PDF export | Grease Pencil drawings can be exported as PDF. |
+| New | Path guiding | Cycles finds light faster in dark interior scenes, so renders get less noisy. |
+| New | Exact boolean solver | Cutting one object with another no longer leaves holes on tricky shapes. |
+| New | Manifold boolean solver | A second, faster boolean method is available and no longer just listed without working. |
+| New | Compressed glTF files | .glb models that use Draco compression now import instead of arriving empty. |
+| New | Brushes and assets | Sculpting, painting and Grease Pencil have their brushes, and the bundled node groups exist. |
+| New | 49 languages | The interface language menu is no longer empty. |
+| New | One finger scrolling | Drag anywhere on a panel, header or tool bar to scroll it. A tap still presses the button under it. |
+| New | Three finger pan | Slide the 3D view around with three fingers. Two fingers still orbit and pinch to zoom. |
+| New | Screen rotation | The interface follows the phone between portrait and landscape. |
+| New | Keyboard typing | Typing in name and search fields works, autocorrect included. |
+| Adjusted | Stylus pressure | Pen pressure reaches 100% with a comfortable press instead of being impossible to reach. |
+| Adjusted | Faster viewport | Orbiting a heavy scene is about 25% faster in EEVEE. |
+| Adjusted | Memory for phones | Heavy scenes load instead of closing the app, because the viewport uses phone sized amounts of graphics memory. |
+| Adjusted | Interface sizing | Slightly larger interface and thicker editor borders, easier to read and to grab with a finger. |
+| Adjusted | Preferences and render windows | Preferences, the file browser and renders open maximized, since Android cannot open a second window. |
+| Adjusted | Node editor | Box select, dragging links, moving and resizing nodes keep working alongside drag to scroll. |
+| Adjusted | Splash and icon | New splash artwork and a launcher icon that fits its mask on a dark background. |
+| Fixed | Modifier buttons | Buttons in modifier panels respond to a single tap, and the modifier menu opens. |
+| Fixed | Reset to default | Resetting the pen pressure setting gives back the value a fresh install starts with. |
+| Fixed | Crash in portrait | The 2D Animation and Storyboarding templates no longer close the app when opened in portrait. |
+| Fixed | Subdivision | The Subdivision Surface modifier shows the smoothed mesh instead of nothing. |
+| Fixed | EEVEE shadows | EEVEE renders instead of failing to build its shadow and lighting shaders. |
+| Fixed | Heavy scenes closing | Opening a scene full of large textures no longer kills the app without warning. |
+| Fixed | Text fields | Typed characters appear as you type them, not only when a suggestion is tapped. |
+| Fixed | Updates not applying | A new version of the app really replaces what is on the device instead of reusing old files. |
+| Fixed | Two finger gestures | Scrolling a panel with two fingers no longer zooms it at the same time. |

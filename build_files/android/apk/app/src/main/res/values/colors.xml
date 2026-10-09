@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+    <!-- Kronos3D palette: matte dark blue with white accents -->
+    <color name="k3d_blue">#4A90D9</color>
+    <color name="k3d_blue_dark">#357ABD</color>
+    <color name="k3d_blue_pressed">#2E6DA4</color>
+    <color name="k3d_background">#121212</color>
+    <color name="k3d_surface">#1E1E1E</color>
+    <color name="k3d_text_primary">#FFFFFF</color>
+    <color name="k3d_text_secondary">#B0B0B0</color>
+    <color name="k3d_button_disabled">#555555</color>
+    <color name="k3d_progress_track">#2A2A2A</color>
+    <color name="k3d_warning_text">#F0C88A</color>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+    <string name="app_name">Kronos3D</string>
+</resources>

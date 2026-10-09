@@ -1,0 +1,431 @@
+/* SPDX-FileCopyrightText: 2025 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup gpu
+ */
+
+#include <chrono>
+#include <condition_variable>
+#include <thread>
+
+#include "BLI_mutex.hh"
+
+#include "vk_device.hh"
+#include "vk_to_string.hh"
+
+#include "CLG_log.h"
+
+#ifdef __ANDROID__
+#  include <android/log.h>
+#  include <cstdarg>
+#  include <cstdlib>
+#  include <sys/system_properties.h>
+/* Per-submission tracing, several lines a frame, so off unless `debug.blender.log` is set. */
+static void vk_submit_log(const char *format, ...)
+{
+  static const bool enabled = []() {
+    char value[PROP_VALUE_MAX] = {};
+    return __system_property_get("debug.blender.log", value) > 0 && atoi(value) != 0;
+  }();
+  if (!enabled) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  __android_log_vprint(ANDROID_LOG_INFO, "blender-vksubmit", format, args);
+  va_end(args);
+}
+#  define VKSUBLOG(...) vk_submit_log(__VA_ARGS__)
+#else
+#  define VKSUBLOG(...) ((void)0)
+#endif
+
+namespace blender {
+
+static CLG_LogRef LOG = {"gpu.vulkan"};
+
+namespace gpu {
+
+/* -------------------------------------------------------------------- */
+/** \name Render graph
+ * \{ */
+
+struct VKRenderGraphWait {
+  Mutex is_submitted_mutex;
+  std::condition_variable_any is_submitted_condition;
+  bool is_submitted;
+};
+
+struct VKRenderGraphSubmitTask {
+  render_graph::VKRenderGraph *render_graph;
+  uint64_t timeline;
+  bool submit_to_device;
+  VkPipelineStageFlags wait_dst_stage_mask;
+  VkSemaphore wait_semaphore;
+  VkSemaphore signal_semaphore;
+  VkFence signal_fence;
+  VKRenderGraphWait *wait_for_submission;
+};
+
+TimelineValue VKDevice::render_graph_submit(render_graph::VKRenderGraph *render_graph,
+                                            VKDiscardPool &context_discard_pool,
+                                            bool submit_to_device,
+                                            bool wait_for_submission,
+                                            bool wait_for_completion,
+                                            VkPipelineStageFlags wait_dst_stage_mask,
+                                            VkSemaphore wait_semaphore,
+                                            VkSemaphore signal_semaphore,
+                                            VkFence signal_fence)
+{
+  /* Syncing input flags. */
+  /* When we wait for completion/submission we must submit to device. */
+  submit_to_device |= wait_for_completion;
+  submit_to_device |= wait_for_submission;
+  /* We don't need to wait for submission when waiting for completion. */
+  wait_for_submission &= !wait_for_completion;
+
+  VKRenderGraphSubmitTask *submit_task = MEM_new<VKRenderGraphSubmitTask>(__func__);
+  submit_task->render_graph = render_graph;
+  submit_task->submit_to_device = submit_to_device;
+  submit_task->wait_dst_stage_mask = wait_dst_stage_mask;
+  submit_task->wait_semaphore = wait_semaphore;
+  submit_task->signal_semaphore = signal_semaphore;
+  submit_task->signal_fence = signal_fence;
+  submit_task->wait_for_submission = nullptr;
+
+  VKRenderGraphWait wait_condition{};
+  if (wait_for_submission) {
+    submit_task->wait_for_submission = &wait_condition;
+  }
+  TimelineValue timeline = 0;
+  {
+    std::scoped_lock lock(orphaned_data.mutex_get());
+    timeline = submit_task->timeline = submit_to_device ? ++timeline_value_ : timeline_value_ + 1;
+    orphaned_data.timeline_ = timeline;
+    orphaned_data.move_data(context_discard_pool, timeline);
+    BLI_thread_queue_push(
+        submitted_render_graphs_, submit_task, BLI_THREAD_QUEUE_WORK_PRIORITY_NORMAL);
+  }
+  submit_task = nullptr;
+
+  if (wait_for_submission) {
+    std::unique_lock<Mutex> lock(wait_condition.is_submitted_mutex);
+    wait_condition.is_submitted_condition.wait(lock, [&] { return wait_condition.is_submitted; });
+  }
+
+  if (wait_for_completion) {
+    wait_for_timeline(timeline);
+  }
+  return timeline;
+}
+
+void VKDevice::wait_for_timeline(TimelineValue timeline)
+{
+  if (timeline == 0) {
+    return;
+  }
+  VkSemaphoreWaitInfo vk_semaphore_wait_info = {
+      VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1, &vk_timeline_semaphore_, &timeline};
+  if (is_device_lost()) {
+    /* Nothing will ever signal this. Return so the caller unwinds and releases its locks. */
+    return;
+  }
+  /* Wait in slices rather than indefinitely: a wedged GPU is not always reported as
+   * VK_ERROR_DEVICE_LOST, and blocking forever here deadlocks callers holding the draw lock. */
+  const int max_attempts = 5;
+  VkResult wait_result;
+  for (int attempt = 0;; attempt++) {
+    wait_result = functions.vkWaitSemaphores(vk_device_, &vk_semaphore_wait_info, 2000000000ull);
+    if (wait_result != VK_TIMEOUT) {
+      break;
+    }
+    if (is_device_lost()) {
+      VKSUBLOG("wait ABORTED (device lost) want=%llu signalled=%llu",
+               (unsigned long long)timeline,
+               (unsigned long long)submission_finished_timeline_get());
+      return;
+    }
+    const TimelineValue signalled = submission_finished_timeline_get();
+    VKSUBLOG("wait STUCK want=%llu signalled=%llu allocated=%llu attempt=%d",
+             (unsigned long long)timeline,
+             (unsigned long long)signalled,
+             (unsigned long long)timeline_value_,
+             attempt);
+    if (attempt + 1 >= max_attempts) {
+      device_lost_.store(true, std::memory_order_relaxed);
+      CLOG_ERROR(&LOG,
+                 "Vulkan: GPU stopped making progress (waiting for %llu, signalled %llu). "
+                 "Treating the device as lost.",
+                 (unsigned long long)timeline,
+                 (unsigned long long)signalled);
+      VKSUBLOG("wait GIVING UP want=%llu signalled=%llu -> device marked lost",
+               (unsigned long long)timeline,
+               (unsigned long long)signalled);
+      return;
+    }
+  }
+  if (wait_result != VK_SUCCESS) {
+    CLOG_ERROR(
+        &LOG, "Vulkan: failed to wait for synchronization timeline [%s]", to_string(wait_result));
+  }
+}
+
+void VKDevice::wait_queue_idle()
+{
+  std::scoped_lock lock(*queue_mutex_);
+  functions.vkQueueWaitIdle(vk_queue_);
+}
+
+render_graph::VKRenderGraph *VKDevice::render_graph_new()
+{
+  render_graph::VKRenderGraph *render_graph = static_cast<render_graph::VKRenderGraph *>(
+      BLI_thread_queue_pop_timeout(unused_render_graphs_, 0));
+  if (render_graph) {
+    return render_graph;
+  }
+
+  std::scoped_lock lock(resources.mutex);
+  render_graph = MEM_new<render_graph::VKRenderGraph>(__func__, resources);
+  render_graphs_.append(render_graph);
+  return render_graph;
+}
+
+void VKDevice::submission_runner(VKDevice *device)
+{
+  CLOG_TRACE(&LOG, "Submission runner has started");
+
+  VkCommandPool vk_command_pool = VK_NULL_HANDLE;
+  VkCommandPoolCreateInfo vk_command_pool_create_info = {
+      VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      nullptr,
+      VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      device->vk_queue_family_};
+  device->functions.vkCreateCommandPool(
+      device->vk_device_, &vk_command_pool_create_info, nullptr, &vk_command_pool);
+
+  render_graph::VKScheduler scheduler;
+  render_graph::VKCommandBuilder command_builder;
+  Vector<VkCommandBuffer> command_buffers_unused;
+  TimelineResources<VkCommandBuffer> command_buffers_in_use;
+  VkCommandBuffer vk_command_buffer = VK_NULL_HANDLE;
+  std::optional<render_graph::VKCommandBufferWrapper> command_buffer;
+  uint64_t previous_gc_timeline = 0;
+  uint64_t num_nodes = 0;
+
+  CLOG_TRACE(&LOG, "Submission runner initialized");
+  while (!device->submission_thread_should_exit_) {
+    VKRenderGraphSubmitTask *submit_task = static_cast<VKRenderGraphSubmitTask *>(
+        BLI_thread_queue_pop_timeout(device->submitted_render_graphs_, 1));
+    if (submit_task == nullptr) {
+      continue;
+    }
+    uint64_t current_timeline = device->submission_finished_timeline_get();
+    if (assign_if_different(previous_gc_timeline, current_timeline)) {
+      device->orphaned_data.destroy_discarded_resources(*device, current_timeline);
+    }
+
+    if (!command_buffer.has_value()) {
+      /* Check for completed command buffers that can be reused. */
+      if (command_buffers_unused.is_empty()) {
+        command_buffers_in_use.remove_old(current_timeline,
+                                          [&](VkCommandBuffer vk_command_buffer) {
+                                            command_buffers_unused.append(vk_command_buffer);
+                                          });
+      }
+
+      /* Create new command buffers when there are no left to be reused. */
+      if (command_buffers_unused.is_empty()) {
+        command_buffers_unused.resize(10, VK_NULL_HANDLE);
+        VkCommandBufferAllocateInfo vk_command_buffer_allocate_info = {
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            nullptr,
+            vk_command_pool,
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            10};
+        device->functions.vkAllocateCommandBuffers(
+            device->vk_device_, &vk_command_buffer_allocate_info, command_buffers_unused.data());
+      };
+
+      vk_command_buffer = command_buffers_unused.pop_last();
+      command_buffer = std::make_optional<render_graph::VKCommandBufferWrapper>(
+          vk_command_buffer, device->functions, device->extensions_);
+      command_buffer->begin_recording();
+    }
+
+    BLI_assert(vk_command_buffer != VK_NULL_HANDLE);
+
+    render_graph::VKRenderGraph &render_graph = *submit_task->render_graph;
+    Span<render_graph::NodeHandle> node_handles = scheduler.select_nodes(render_graph);
+    {
+      std::scoped_lock lock_resources(device->resources.mutex);
+      command_builder.build_nodes(render_graph, *command_buffer, node_handles);
+    }
+    command_builder.record_commands(render_graph, *command_buffer, node_handles);
+    num_nodes += node_handles.size();
+
+#ifdef __ANDROID__
+    {
+      int counts[32] = {};
+      for (render_graph::NodeHandle handle : node_handles) {
+        counts[int(render_graph.nodes_[handle].type) & 31]++;
+      }
+      char buf[512];
+      int off = 0;
+      for (int t = 0; t < 32; t++) {
+        if (counts[t]) {
+          off += snprintf(buf + off, sizeof(buf) - off, "%d:%d ", t, counts[t]);
+        }
+      }
+      VKSUBLOG("graph timeline=%llu nodes=%d types[%s]",
+               (unsigned long long)submit_task->timeline,
+               int(node_handles.size()),
+               buf);
+    }
+#endif
+
+    if (submit_task->submit_to_device) {
+      /* Finalize current command buffer. */
+      command_buffer->end_recording();
+
+      uint32_t wait_semaphore_len = submit_task->wait_semaphore == VK_NULL_HANDLE ? 1 : 2;
+      VkSemaphore wait_semaphores[2] = {device->vk_timeline_semaphore_,
+                                        submit_task->wait_semaphore};
+      uint64_t wait_semaphore_values[2] = {submit_task->timeline - 1, 0};
+
+      uint32_t signal_semaphore_len = submit_task->signal_semaphore == VK_NULL_HANDLE ? 1 : 2;
+      VkSemaphore signal_semaphores[2] = {device->vk_timeline_semaphore_,
+                                          submit_task->signal_semaphore};
+      uint64_t signal_semaphore_values[2] = {submit_task->timeline, 0};
+      VkPipelineStageFlags pipeline_stage_flags[2] = {VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                                      submit_task->wait_dst_stage_mask};
+
+      VkTimelineSemaphoreSubmitInfo vk_timeline_semaphore_submit_info = {
+          VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+          nullptr,
+          wait_semaphore_len,
+          wait_semaphore_values,
+          signal_semaphore_len,
+          signal_semaphore_values};
+      VkSubmitInfo vk_submit_info = {VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                                     &vk_timeline_semaphore_submit_info,
+                                     wait_semaphore_len,
+                                     wait_semaphores,
+                                     pipeline_stage_flags,
+                                     1,
+                                     &vk_command_buffer,
+                                     signal_semaphore_len,
+                                     signal_semaphores};
+
+      CLOG_TRACE(&LOG, "Submitting %u render graph nodes to device.", uint32_t(num_nodes));
+      const uint64_t submitted_nodes = num_nodes;
+      num_nodes = 0;
+
+      if (device->is_device_lost()) {
+        /* Queue is dead; every further submit would fail. Skip it, but keep draining the
+         * task queue so waiters are released and command buffers are recycled. */
+        VKSUBLOG("submit timeline=%llu SKIPPED (device lost)",
+                 (unsigned long long)submit_task->timeline);
+      }
+      else {
+        std::scoped_lock lock_queue(*device->queue_mutex_);
+        VkResult submit_result = device->functions.vkQueueSubmit(
+            device->vk_queue_, 1, &vk_submit_info, submit_task->signal_fence);
+        VKSUBLOG(
+            "submit timeline=%llu nodes=%u waits_for=%llu signalled=%llu wait_sem=%p "
+            "signal_sem=%p res=%d",
+            (unsigned long long)submit_task->timeline,
+            uint32_t(submitted_nodes),
+            (unsigned long long)(submit_task->timeline - 1),
+            (unsigned long long)device->submission_finished_timeline_get(),
+            (void *)submit_task->wait_semaphore,
+            (void *)submit_task->signal_semaphore,
+            int(submit_result));
+        if (submit_result == VK_ERROR_DEVICE_LOST) {
+          /* The timeline semaphore will never advance again. Latch this so waiters give up
+           * instead of blocking forever while holding higher level locks. */
+          if (!device->device_lost_.exchange(true, std::memory_order_relaxed)) {
+            CLOG_ERROR(&LOG,
+                       "Vulkan: device lost on submission %llu; GPU work is no longer being "
+                       "executed.",
+                       (unsigned long long)submit_task->timeline);
+          }
+        }
+      }
+      if (submit_task->wait_for_submission != nullptr) {
+        std::unique_lock<Mutex> lock(submit_task->wait_for_submission->is_submitted_mutex);
+        submit_task->wait_for_submission->is_submitted = true;
+        submit_task->wait_for_submission->is_submitted_condition.notify_one();
+      }
+      command_buffers_in_use.append_timeline(submit_task->timeline, vk_command_buffer);
+      vk_command_buffer = VK_NULL_HANDLE;
+      command_buffer.reset();
+    }
+
+    render_graph.reset();
+    BLI_thread_queue_push(device->unused_render_graphs_,
+                          std::move(submit_task->render_graph),
+                          BLI_THREAD_QUEUE_WORK_PRIORITY_NORMAL);
+    MEM_delete<VKRenderGraphSubmitTask>(submit_task);
+  }
+  CLOG_TRACE(&LOG, "Submission runner is being canceled");
+
+  /* Clear command buffers and pool */
+  {
+    std::scoped_lock lock(*device->queue_mutex_);
+    device->functions.vkDeviceWaitIdle(device->vk_device_);
+  }
+  command_buffers_in_use.remove_old(UINT64_MAX, [&](VkCommandBuffer vk_command_buffer) {
+    command_buffers_unused.append(vk_command_buffer);
+  });
+  device->functions.vkFreeCommandBuffers(device->vk_device_,
+                                         vk_command_pool,
+                                         command_buffers_unused.size(),
+                                         command_buffers_unused.data());
+  device->functions.vkDestroyCommandPool(device->vk_device_, vk_command_pool, nullptr);
+  CLOG_TRACE(&LOG, "Submission runner finished");
+}
+
+void VKDevice::init_submission_thread()
+{
+  CLOG_TRACE(&LOG, "Create submission thread");
+  submission_thread_should_exit_ = false;
+  submitted_render_graphs_ = BLI_thread_queue_init();
+  unused_render_graphs_ = BLI_thread_queue_init();
+
+  VkSemaphoreTypeCreateInfo vk_semaphore_type_create_info = {
+      VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, nullptr, VK_SEMAPHORE_TYPE_TIMELINE, 0};
+  VkSemaphoreCreateInfo vk_semaphore_create_info = {
+      VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &vk_semaphore_type_create_info, 0};
+  functions.vkCreateSemaphore(
+      vk_device_, &vk_semaphore_create_info, nullptr, &vk_timeline_semaphore_);
+
+  submission_thread_ = std::thread(VKDevice::submission_runner, this);
+}
+
+void VKDevice::deinit_submission_thread()
+{
+  CLOG_TRACE(&LOG, "Stopping submission thread");
+  submission_thread_should_exit_ = true;
+  CLOG_TRACE(&LOG, "Waiting for completion");
+  submission_thread_.join();
+
+  while (!BLI_thread_queue_is_empty(submitted_render_graphs_)) {
+    VKRenderGraphSubmitTask *submit_task = static_cast<VKRenderGraphSubmitTask *>(
+        BLI_thread_queue_pop(submitted_render_graphs_));
+    MEM_delete<VKRenderGraphSubmitTask>(submit_task);
+  }
+  BLI_thread_queue_free(submitted_render_graphs_);
+  submitted_render_graphs_ = nullptr;
+  BLI_thread_queue_free(unused_render_graphs_);
+  unused_render_graphs_ = nullptr;
+
+  functions.vkDestroySemaphore(vk_device_, vk_timeline_semaphore_, nullptr);
+  vk_timeline_semaphore_ = VK_NULL_HANDLE;
+}
+
+/** \} */
+
+}  // namespace gpu
+}  // namespace blender

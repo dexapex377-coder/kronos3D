@@ -1,0 +1,38 @@
+Android support for Intel Open Image Denoise 2.5.0.
+
+Bionic only exposes pthread_{get,set}affinity_np from API level 36, so the
+Linux thread-pinning path in the CPU device fails to link against a lower
+minSdk. sched_{get,set}affinity take a pid where 0 means the calling thread
+and have existed in every API level; PinningObserver always runs on the very
+thread it is pinning, so the two spellings are equivalent here.
+
+--- a/core/thread.cpp
++++ b/core/thread.cpp
+@@ -131,6 +131,27 @@
+   // ThreadAffinity: Linux
+   // -----------------------------------------------------------------------------------------------
+ 
++#if defined(__ANDROID__)
++
++  // Bionic gained pthread_{get,set}affinity_np only in API level 36. The
++  // sched_* calls take a pid, where 0 means the calling thread, and exist in
++  // every API level. PinningObserver runs set()/restore() on the very thread
++  // being pinned, so the two spellings are equivalent here.
++  static int oidnGetThreadAffinity(pthread_t, size_t size, cpu_set_t* set)
++  {
++    return sched_getaffinity(0, size, set);
++  }
++
++  static int oidnSetThreadAffinity(pthread_t, size_t size, const cpu_set_t* set)
++  {
++    return sched_setaffinity(0, size, set);
++  }
++
++  #define pthread_getaffinity_np oidnGetThreadAffinity
++  #define pthread_setaffinity_np oidnSetThreadAffinity
++
++#endif
++
+   ThreadAffinity::ThreadAffinity(int maxNumThreadsPerCore, int verbose)
+     : Verbose(verbose)
+   {

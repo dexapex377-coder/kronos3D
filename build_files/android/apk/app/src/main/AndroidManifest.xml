@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- No package attribute: AGP 9 ignores it and derives the identity from
+     applicationId/namespace in app/build.gradle instead. Keeping it only draws a
+     warning saying the value is ignored. versionCode/versionName likewise live in
+     the build file now, where -PblenderVersionName can override them. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Vulkan is used at runtime; not required so it installs on emulators too. -->
+    <uses-feature android:name="android.hardware.vulkan.version"
+        android:version="0x400000" android:required="false" />
+    <!-- Extension repositories, the "Get Extensions" browser and any script that
+         fetches a URL all go through Python's urllib. Without this the socket
+         call fails with EPERM before a connection is ever attempted. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Lets Kronos3D tell "offline" apart from "server unreachable" if that
+         distinction is ever wanted; harmless and not a runtime permission. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!-- Kronos3D reads and writes .blend files and their assets by path, so it needs
+         access to shared storage rather than the scoped, app-private sandbox. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <application
+        android:label="Kronos3D"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.Kronos3D"
+        android:hasCode="true"
+        android:allowBackup="true"
+        android:largeHeap="true">
+
+        <!-- The launcher screen. It carries MAIN
+             and LAUNCHER instead of BlenderActivity: this is what the app icon
+             opens, and it starts no native code, so Blender only comes up after
+             the tap.
+
+             A .blend tapped in a file manager does NOT come through here:
+             the VIEW/EDIT filters below are on BlenderActivity, which the
+             system calls directly. -->
+        <activity
+            android:name="com.kronos3d.app.LauncherActivity"
+            android:label="Kronos3D"
+            android:theme="@style/Theme.Kronos3D.Launcher"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Credits and the code quality notice. No native code, no
+             screenOrientation: it is reached from the launcher, which is
+             already following the device rotation, so letting this follow it too
+             avoids a rotation jump on the way in. -->
+        <activity
+            android:name="com.kronos3d.app.AboutActivity"
+            android:label="Credits"
+            android:theme="@style/Theme.Kronos3D.Launcher"
+            android:exported="false" />
+
+        <!-- BlenderActivity extends NativeActivity; loads libblender.so and
+             bridges soft-keyboard IME text to native.
+
+             screenOrientation="user" follows the device's own rotation setting,
+             so the app turns when the user lets it and stays put when they have
+             rotation locked. orientation and screenSize are in configChanges,
+             which keeps the activity from being recreated on every turn: the
+             surface is resized under it instead, and GHOST rebuilds the Vulkan
+             swapchain from APP_CMD_WINDOW_RESIZED.
+
+             launchMode="singleTask" is not cosmetic: this is a NativeActivity, and a
+             second instance in the same process would run ANativeActivity_onCreate
+             again, starting a second android_main and a second Blender init on top of
+             the first. It makes a tapped .blend arrive at onNewIntent in the running
+             instance instead. -->
+        <activity
+            android:name="com.kronos3d.app.BlenderActivity"
+            android:label="Kronos3D"
+            android:launchMode="singleTask"
+            android:screenOrientation="user"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|density|navigation|uiMode"
+            android:exported="true">
+            <meta-data android:name="android.app.lib_name" android:value="blender" />
+
+            <!-- "Open with Kronos3D" for a .blend tapped in a file manager.
+
+                 The match is made on the file name, not the MIME type: there is no
+                 registered type for .blend and an app cannot add one to the system's
+                 MimeTypeMap, so a document provider reports application/octet-stream.
+                 mimeType="*/*" does not put Kronos3D in every file's "Open with":
+                 a data filter has to match every attribute it declares, and
+                 pathSuffix still has to hold.
+
+                 pathSuffix rather than the usual pathPattern=".*\\.blend": Android's
+                 PatternMatcher implements ".*" without backtracking, so the greedy
+                 run swallows the extension and the match fails on any path with a dot
+                 in it. pathSuffix arrived in API 29 and minSdk here is 31.
+
+                 host="*" is what makes the suffix count, and it is not optional.
+                 IntentFilter.matchData only reaches the path patterns inside the
+                 branch it takes when the filter declares an authority; a filter
+                 without one never evaluates them and quietly matches every URI of
+                 its scheme. Measured on the device: a file:// filter carrying this
+                 same pathSuffix offered Kronos3D for a .jpg.
+
+                 Which is also why there is no file:// filter here. A file URI has
+                 no authority at all, and matchDataAuthority rejects a null host, so
+                 declaring one would make the filter match nothing rather than
+                 everything. There is no setting that matches only .blend. Nothing
+                 is lost: an app that hands a file:// URI to another app has thrown
+                 FileUriExposedException since API 24, so what file managers actually
+                 send is content://. resolveUriToPath() still understands the scheme
+                 for the case of an explicit component, such as adb. -->
+            <intent-filter android:label="Kronos3D">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="*"
+                    android:mimeType="*/*" android:pathSuffix=".blend" />
+            </intent-filter>
+
+            <!-- The same shape again with no mimeType at all, and it is not a
+                 duplicate. A filter that declares a type matches only an intent that
+                 carries one: IntentFilter.matchData answers NO_MATCH_TYPE both for a
+                 null type against a typed filter and for a typed intent against an
+                 untyped filter, so the two cases genuinely need two filters.
+
+                 The untyped case is the common one, and the one that made this look
+                 broken. A file manager builds the intent type from MimeTypeMap, which
+                 has no entry for .blend, so it sends the URI with no type at all.
+                 Samsung's My Files does exactly that, and answered "You don't have any
+                 apps that can open this type of file" while adb, which was passing a
+                 type, resolved to Kronos3D perfectly well. -->
+            <intent-filter android:label="Kronos3D">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="*"
+                    android:pathSuffix=".blend" />
+            </intent-filter>
+
+            <!-- MediaStore, where the file name does not survive at all.
+                 A MediaStore URI names a row by number: the file the two filters
+                 above match as
+                 ".../document/primary:Download/Astronaut/Astronaut_v003.blend"
+                 arrives here as "content://media/external/file/1000109705". There is
+                 no extension in it, so no suffix can be matched, and a filter that
+                 declares a path never matches at all.
+
+                 This is not a corner: it is what Samsung's My Files sends, which is
+                 why tapping a .blend there answered "You don't have any apps that can
+                 open this type of file" while every check against a document provider
+                 URI resolved to Kronos3D. Measured with query-activities: that URI with
+                 an empty type resolved to no activities whatsoever.
+
+                 mimeType="*/*" is the only type that can be declared, because the type
+                 My Files sends is the empty string. findMimeType() answers an empty
+                 type through its "matches every type" branch, which only a wildcard
+                 filter has. An empty type cannot be declared in a manifest.
+
+                 So the file name cannot narrow this and the type cannot either. What
+                 narrows it is the collection: pathPrefix keeps it to the non-media
+                 tables, so an image, a video or a piece of music never offers Kronos3D.
+                 A non-media file of another kind will, which is the price of being
+                 reachable from a file manager at all. Both volume spellings are
+                 declared: "external" is what this device uses, "external_primary" is
+                 what the platform documents. -->
+            <intent-filter android:label="Kronos3D">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="media"
+                    android:mimeType="*/*" android:pathPrefix="/external/file" />
+                <data android:scheme="content" android:host="media"
+                    android:mimeType="*/*" android:pathPrefix="/external/downloads" />
+                <data android:scheme="content" android:host="media"
+                    android:mimeType="*/*" android:pathPrefix="/external_primary/file" />
+                <data android:scheme="content" android:host="media"
+                    android:mimeType="*/*" android:pathPrefix="/external_primary/downloads" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

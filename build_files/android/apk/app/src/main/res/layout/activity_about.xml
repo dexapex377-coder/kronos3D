@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- Credits and code quality notice. The whole card scrolls. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/launcher_background"
+    android:fillViewport="true"
+    android:scrollbars="none">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginHorizontal="18dp"
+        android:background="@drawable/launcher_panel"
+        android:orientation="vertical"
+        android:paddingHorizontal="22dp"
+        android:paddingVertical="18dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:letterSpacing="0.03"
+            android:text="Credits"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:letterSpacing="0.1"
+            android:text="Kronos3D 5.3.0 ALPHA"
+            android:textColor="@color/k3d_blue"
+            android:textSize="9sp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp"
+            android:background="#2E4361" />
+
+        <!-- Warning first: it qualifies everything below it. -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/warning_card"
+            android:lineSpacingExtra="2dp"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="10dp"
+            android:text="This is AI-assisted code and it is not reviewed to production standards. Expect bugs: rendering, GPU and threading mistakes tend to show up as a black viewport, a corrupted frame or a crash. There is no test suite, no code review and no performance profiling. Treat it as a sketchbook, not a reference implementation."
+            android:textColor="@color/k3d_warning_text"
+            android:textSize="11sp" />
+
+        <!-- Blender -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:lineSpacingExtra="3dp"
+            android:text="Blender is made and maintained by the Blender Foundation and a large community of contributors. Kronos3D is unofficial and is not affiliated with or endorsed by the Blender Foundation. Blender is a trademark of its owners, used here only to say what this is derived from."
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/about_blender_link"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:autoLink="web"
+            android:lineSpacingExtra="3dp"
+            android:text="blender.org  ·  blender.org/about/license"
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <!-- Original Android port -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:letterSpacing="0.08"
+            android:text="THE ORIGINAL ANDROID PORT"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:lineSpacingExtra="3dp"
+            android:text="idimus (a.k.a. simfeo) wrote the first working arm64/Vulkan port, and with it the cross-compile toolchain this tree still builds on: the NDK plumbing, env.sh, the dependency stack, and build_files/android/BUILDING.md. Every later port starts from that bring-up."
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/about_origin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:autoLink="web"
+            android:lineSpacingExtra="3dp"
+            android:text="github.com/simfeo/blender"
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <!-- The fork this tree is based on -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:letterSpacing="0.08"
+            android:text="THE FORK THIS TREE IS BASED ON"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:lineSpacingExtra="3dp"
+            android:text="Wanderson-Magalhaes is the fork this tree is built from — it is his build, not a fresh one. His work here: the Android gestures, the on-screen keyboard (native, drawn by Blender, sends real key events, holds Ctrl/Shift/Alt), the Preferences-menu memory fix, and the two documents in the root of this tree, ANDROID_AI_GUIDE.md and ANDROID_WHATS_NEW.md. He built and tested on a Galaxy S24 Ultra; some of his fixes are specific to that device."
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/about_fork"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:autoLink="web"
+            android:lineSpacingExtra="3dp"
+            android:text="github.com/Wanderson-Magalhaes/blender_for_android"
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <!-- Kronos3D -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:letterSpacing="0.08"
+            android:text="KRONOS3D"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:lineSpacingExtra="3dp"
+            android:text="Our work in this tree: the GPU/context and thread-ownership fixes, the shortcut system and the pie menu that replaced the on-screen keyboard, the rebranding, the launcher, and the split native/APK packaging workflows. The Blender 5.3 build method used here is simfeo's toolchain (env.sh, the dependency stack, BUILDING.md), inherited via Wanderson's fork. Our separate build method lives in another repo and is not used here."
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/about_kronos"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:autoLink="web"
+            android:lineSpacingExtra="3dp"
+            android:text="github.com/dexapex377-coder/kronos3D"
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <!-- License -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:letterSpacing="0.08"
+            android:text="LICENSE"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/about_license"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:autoLink="web"
+            android:lineSpacingExtra="3dp"
+            android:text="GNU General Public License v3.0 or later, inherited from Blender. If you redistribute a binary built from this tree, you must also provide the corresponding source code. blender.org/about/license"
+            android:textColor="@color/k3d_text_secondary"
+            android:textSize="11sp" />
+
+        <Button
+            android:id="@+id/about_close"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/credits_button"
+            android:text="Close"
+            android:textAllCaps="false"
+            android:textColor="@color/k3d_text_primary"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+</ScrollView>

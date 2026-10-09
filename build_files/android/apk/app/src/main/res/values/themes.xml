@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<resources>
+
+    <!--
+      Without a theme the app inherits the platform default, whose window is
+      white: the launch splash then shows the icon's dark square floating on a
+      white page, with white to either side of it.
+
+      The three splash attributes are API 31 and this build's minSdk is 31, so
+      they always apply. The icon used here is the logo on its own, because the
+      splash paints the background itself and a drawable carrying a second one
+      would appear as a lighter rectangle inside it.
+    -->
+    <style name="Theme.Kronos3D" parent="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/k3d_background</item>
+        <item name="android:windowSplashScreenBackground">@color/k3d_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/k3d_background</item>
+    </style>
+
+    <!-- The launcher gets the app icon as its system splash, so it does not
+         read as a second Kronos3D splash on the way into the launcher screen.
+         Its own window background is the launcher's dark, not Kronos3D's
+         interface dark. -->
+    <style name="Theme.Kronos3D.Launcher" parent="Theme.Kronos3D">
+        <item name="android:windowBackground">@color/k3d_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/k3d_background</item>
+        <!-- The credits screen autoLinks its URLs, and the platform default
+             link colour is a blue that fights the palette. -->
+        <item name="android:textColorLink">@color/k3d_blue</item>
+    </style>
+
+</resources>

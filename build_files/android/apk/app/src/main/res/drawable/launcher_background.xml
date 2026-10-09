@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- Launcher backdrop: a very dark blue vertical gradient with a soft blue
+     glow at the top, so the panel in the middle has something to sit on instead
+     of a flat #121212. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="270"
+                android:endColor="#0B0F18"
+                android:startColor="#182234"
+                android:type="linear" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:centerX="0.5"
+                android:centerY="0.0"
+                android:endColor="#00122033"
+                android:gradientRadius="420dp"
+                android:startColor="#334A6E"
+                android:type="radial" />
+        </shape>
+    </item>
+</layer-list>

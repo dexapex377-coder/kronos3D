@@ -1,0 +1,18 @@
+// Plugin markers, not plain jars: `plugins { id 'org.jetbrains.kotlin.plugin.compose' }`
+// resolves through these repositories by marker artifact, and never through the
+// buildscript classpath, so a classpath entry alone fails with "was not found in any
+// of the following sources". gradlePluginPortal carries the Kotlin markers,
+// google() the Android ones.
+//
+// pluginManagement has to be the very first statement in the file; Gradle rejects
+// the script outright if any statement precedes it.
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+rootProject.name = 'Kronos3D'
+include ':app'

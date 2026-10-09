@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 Kronos3D Contributors
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<!-- Secondary action: outlined, so it does not compete with the launch button. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#333F5C" />
+            <corners android:radius="14dp" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/k3d_blue" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#1A2436" />
+            <corners android:radius="14dp" />
+            <stroke
+                android:width="1dp"
+                android:color="#3C527A" />
+        </shape>
+    </item>
+</selector>

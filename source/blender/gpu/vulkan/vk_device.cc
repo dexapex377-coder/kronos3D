@@ -1,0 +1,741 @@
+/* SPDX-FileCopyrightText: 2023 Blender Authors
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later */
+
+/** \file
+ * \ingroup gpu
+ */
+
+#include <fmt/format.h>
+#include <fmt/ranges.h>
+#include <sstream>
+
+#include "CLG_log.h"
+
+#include "vk_backend.hh"
+#include "vk_context.hh"
+#include "vk_device.hh"
+#include "vk_pipeline_diag.hh"
+#include "vk_state_manager.hh"
+#include "vk_storage_buffer.hh"
+#include "vk_texture.hh"
+#include "vk_vertex_buffer.hh"
+
+#include "gpu_shader_dependency_private.hh"
+
+#include "GPU_capabilities.hh"
+#include "gpu_capabilities_private.hh"
+
+#include "BLI_math_matrix_types.hh"
+
+namespace blender {
+
+static CLG_LogRef LOG = {"gpu.vulkan"};
+
+namespace gpu {
+
+void VKExtensions::log() const
+{
+  CLOG_DEBUG(&LOG,
+             "Device features\n"
+             " - [%c] shader output viewport index\n"
+             " - [%c] shader output layer\n"
+             " - [%c] fragment shader barycentric\n"
+             " - [%c] wide lines\n"
+             "Device extensions\n"
+             " - [%c] dynamic rendering\n"
+             " - [%c] provoking vertex\n"
+             " - [%c] dynamic rendering local read\n"
+             " - [%c] dynamic rendering unused attachments\n"
+             " - [%c] extended dynamic state\n"
+             " - [%c] external memory\n"
+             " - [%c] graphics pipeline library\n"
+             " - [%c] host image copy\n"
+             " - [%c] line rasterization\n"
+             " - [%c] maintenance4\n"
+             " - [%c] memory priority\n"
+             " - [%c] pageable device local memory\n"
+             " - [%c] shader stencil export\n"
+             " - [%c] ray queries\n"
+             " - [%c] vertex input dynamic state",
+             shader_output_viewport_index ? 'X' : ' ',
+             shader_output_layer ? 'X' : ' ',
+             fragment_shader_barycentric ? 'X' : ' ',
+             wide_lines ? 'X' : ' ',
+             dynamic_rendering ? 'X' : ' ',
+             provoking_vertex ? 'X' : ' ',
+             dynamic_rendering_local_read ? 'X' : ' ',
+             dynamic_rendering_unused_attachments ? 'X' : ' ',
+             extended_dynamic_state ? 'X' : ' ',
+             external_memory ? 'X' : ' ',
+             graphics_pipeline_library ? 'X' : ' ',
+             host_image_copy ? 'X' : ' ',
+             line_rasterization ? 'X' : ' ',
+             maintenance4 ? 'X' : ' ',
+             memory_priority ? 'X' : ' ',
+             pageable_device_local_memory ? 'X' : ' ',
+             GPU_stencil_export_support() ? 'X' : ' ',
+             GPU_ray_query_support() ? 'X' : ' ',
+             vertex_input_dynamic_state ? 'X' : ' ');
+}
+
+void VKWorkarounds::log() const
+{
+  CLOG_DEBUG(&LOG,
+             "Activated workarounds\n"
+             " - [%c] Not 16/32 bit aligned image formats\n"
+             " - [%c] No texture pool",
+             not_aligned_pixel_formats ? 'X' : ' ',
+             GCaps.texture_pool_workaround ? 'X' : ' ');
+}
+
+void VKDevice::reinit()
+{
+  samplers_.free();
+  samplers_.init();
+}
+
+void VKDevice::deinit()
+{
+  if (!is_initialized()) {
+    return;
+  }
+
+  deinit_submission_thread();
+
+  dummy_buffer.free();
+  samplers_.free();
+  GPU_SHADER_FREE_SAFE(vk_backbuffer_blit_sh_);
+
+  orphaned_data_render.deinit(*this);
+  orphaned_data.deinit(*this);
+  {
+    while (!thread_data_.is_empty()) {
+      VKThreadData *thread_data = thread_data_.pop_last();
+      delete thread_data;
+    }
+    thread_data_.clear();
+  }
+  pipelines.write_to_disk();
+  pipelines.free_data(*this);
+  render_pass_fallback.deinit();
+  descriptor_set_layouts_.deinit();
+  vma_pools.deinit(*this);
+  mem_allocator_ = VK_NULL_HANDLE;
+
+  while (!render_graphs_.is_empty()) {
+    render_graph::VKRenderGraph *render_graph = render_graphs_.pop_last();
+    MEM_delete<render_graph::VKRenderGraph>(render_graph);
+  }
+
+  debugging_tools_.deinit(vk_instance_);
+
+  vk_instance_ = VK_NULL_HANDLE;
+  vk_physical_device_ = VK_NULL_HANDLE;
+  vk_device_ = VK_NULL_HANDLE;
+  vk_queue_family_ = 0;
+  vk_queue_ = VK_NULL_HANDLE;
+  vk_physical_device_properties_ = {};
+  glsl_vert_patch_.clear();
+  glsl_frag_patch_.clear();
+  glsl_geom_patch_.clear();
+  glsl_comp_patch_.clear();
+  is_initialized_ = false;
+}
+
+void VKDevice::init(GHOST_IContext *ghost_context)
+{
+  BLI_assert(!is_initialized());
+  GHOST_VulkanHandles handles = {};
+  ghost_context->getVulkanHandles(handles);
+  vk_instance_ = handles.instance;
+  vk_physical_device_ = handles.physical_device;
+  vk_device_ = handles.device;
+  vk_queue_family_ = handles.graphic_queue_family;
+  vk_queue_ = handles.queue;
+  mem_allocator_ = handles.vma_allocator;
+  queue_mutex_ = static_cast<std::mutex *>(handles.queue_mutex);
+
+  volkLoadDeviceTable(&functions, vk_device_);
+
+  /* On Vulkan 1.1 devices, functions promoted to 1.2/1.3 core are only available
+   * under their *KHR names (via the enabled extension). The rest of the backend
+   * calls the core names, so alias any null core pointer to its KHR twin. */
+#define VK_ALIAS_CORE_KHR(fn) \
+  if (functions.fn == nullptr) { \
+    functions.fn = functions.fn##KHR; \
+  }
+  VK_ALIAS_CORE_KHR(vkGetSemaphoreCounterValue);
+  VK_ALIAS_CORE_KHR(vkWaitSemaphores);
+  VK_ALIAS_CORE_KHR(vkSignalSemaphore);
+  VK_ALIAS_CORE_KHR(vkGetBufferDeviceAddress);
+  VK_ALIAS_CORE_KHR(vkGetBufferOpaqueCaptureAddress);
+  VK_ALIAS_CORE_KHR(vkGetDeviceMemoryOpaqueCaptureAddress);
+  VK_ALIAS_CORE_KHR(vkCmdBeginRendering);
+  VK_ALIAS_CORE_KHR(vkCmdEndRendering);
+#undef VK_ALIAS_CORE_KHR
+
+  init_physical_device_extensions();
+  init_physical_device_properties();
+  init_physical_device_memory_properties();
+  init_physical_device_features();
+  VKBackend::platform_init(*this);
+  VKBackend::capabilities_init(*this);
+  init_debug_callbacks();
+  vma_pools.init(*this);
+  pipelines.init();
+  pipelines.read_from_disk();
+
+  samplers_.init();
+  init_dummy_buffer();
+
+  debug::object_label(vk_handle(), "LogicalDevice");
+  debug::object_label(vk_queue_, "GenericQueue");
+
+  resources.use_dynamic_rendering_local_read = extensions_.dynamic_rendering_local_read;
+  if (!extensions_.dynamic_rendering) {
+    render_pass_fallback.init(vk_handle(), functions);
+  }
+  orphaned_data.timeline_ = 0;
+
+  init_submission_thread();
+  is_initialized_ = true;
+}
+
+void VKDevice::init_debug_callbacks()
+{
+  debugging_tools_.init(vk_instance_);
+}
+
+bool VKDevice::format_supports_linear_filter(VkFormat vk_format) const
+{
+  std::scoped_lock lock(format_linear_filter_mutex_);
+  return format_linear_filter_support_.lookup_or_add_cb(vk_format, [&]() {
+    VkFormatProperties properties = {};
+    vkGetPhysicalDeviceFormatProperties(vk_physical_device_, vk_format, &properties);
+    return (properties.optimalTilingFeatures &
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+  });
+}
+
+void VKDevice::init_physical_device_properties()
+{
+  BLI_assert(vk_physical_device_ != VK_NULL_HANDLE);
+
+  VkPhysicalDeviceProperties2 vk_physical_device_properties = {};
+  vk_physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  vk_physical_device_driver_properties_.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+  vk_physical_device_id_properties_.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+  vk_physical_device_properties.pNext = &vk_physical_device_driver_properties_;
+  vk_physical_device_driver_properties_.pNext = &vk_physical_device_id_properties_;
+  vk_physical_device_subgroup_properties_.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+  vk_physical_device_id_properties_.pNext = &vk_physical_device_subgroup_properties_;
+
+  if (supports_extension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME)) {
+    vk_physical_device_maintenance4_properties_.pNext = vk_physical_device_properties.pNext;
+    vk_physical_device_properties.pNext = &vk_physical_device_maintenance4_properties_;
+  }
+
+  if (supports_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+    vk_physical_device_graphics_pipeline_library_properties_.pNext =
+        vk_physical_device_properties.pNext;
+    vk_physical_device_properties.pNext =
+        &vk_physical_device_graphics_pipeline_library_properties_;
+  }
+  if (supports_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+    vk_physical_device_acceleration_structure_properties_.pNext =
+        vk_physical_device_properties.pNext;
+    vk_physical_device_properties.pNext = &vk_physical_device_acceleration_structure_properties_;
+  }
+
+  vkGetPhysicalDeviceProperties2(vk_physical_device_, &vk_physical_device_properties);
+  vk_physical_device_properties_ = vk_physical_device_properties.properties;
+
+  const VkPhysicalDeviceLimits &limits = vk_physical_device_properties_.limits;
+  vk_pipeline_diag_logf(
+      "DEVICE %s | vendor=0x%x | device=0x%x | driver=0x%x | api=%u.%u.%u | name=%s",
+      vk_physical_device_driver_properties_.driverName,
+      vk_physical_device_properties_.vendorID,
+      vk_physical_device_properties_.deviceID,
+      vk_physical_device_properties_.driverVersion,
+      VK_VERSION_MAJOR(vk_physical_device_properties_.apiVersion),
+      VK_VERSION_MINOR(vk_physical_device_properties_.apiVersion),
+      VK_VERSION_PATCH(vk_physical_device_properties_.apiVersion),
+      vk_physical_device_properties_.deviceName);
+  vk_pipeline_diag_logf(
+      "DEVICE-LIMITS | maxComputeWorkGroupInvocations=%u | maxComputeWorkGroupSize=(%u,%u,%u) | "
+      "maxComputeWorkGroupCount=(%u,%u,%u) | maxComputeSharedMemorySize=%u | "
+      "subgroupSize=%u | maxStorageBufferRange=%zu",
+      limits.maxComputeWorkGroupInvocations,
+      limits.maxComputeWorkGroupSize[0],
+      limits.maxComputeWorkGroupSize[1],
+      limits.maxComputeWorkGroupSize[2],
+      limits.maxComputeWorkGroupCount[0],
+      limits.maxComputeWorkGroupCount[1],
+      limits.maxComputeWorkGroupCount[2],
+      limits.maxComputeSharedMemorySize,
+      vk_physical_device_subgroup_properties_.subgroupSize,
+      size_t(limits.maxStorageBufferRange));
+
+  /* Storage image format support: log which render-target formats accept write access, as a
+   * missing STORAGE_IMAGE_BIT on a format EEVEE uses for compute image stores is a classic
+   * PowerVR "VK_ERROR_UNKNOWN on why no crash tells you nothing" failure. */
+  const VkFormat formats_to_check[] = {
+      VK_FORMAT_R8G8B8A8_UNORM,
+      VK_FORMAT_R8G8B8A8_SNORM,
+      VK_FORMAT_R16G16B16A16_SFLOAT,
+      VK_FORMAT_R16G16B16A16_UNORM,
+      VK_FORMAT_R32G32B32A32_SFLOAT,
+      VK_FORMAT_R32G32B32A32_UINT,
+      VK_FORMAT_R32G32B32_UINT,
+      VK_FORMAT_R32G32B32_SFLOAT,
+      VK_FORMAT_R32G32_SFLOAT,
+      VK_FORMAT_R32G32_UINT,
+      VK_FORMAT_R32_SFLOAT,
+      VK_FORMAT_R16_SFLOAT,
+      VK_FORMAT_R16G16_SFLOAT,
+      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+      VK_FORMAT_B8G8R8A8_UNORM,
+      VK_FORMAT_R16G16B16A16_USCALED,
+  };
+  char format_log[1024];
+  size_t format_log_len = 0;
+  for (VkFormat vk_format : formats_to_check) {
+    VkFormatProperties props;
+    vkGetPhysicalDeviceFormatProperties(vk_physical_device_, vk_format, &props);
+    const bool storage = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+    const bool storage_aa = (props.optimalTilingFeatures &
+                             VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) != 0;
+    const bool sampled = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    const bool depth = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+    format_log_len += snprintf(format_log + format_log_len,
+                               sizeof(format_log) - format_log_len,
+                               "%s|%s%s%s%s ",
+                               to_gpu_format_string(vk_format).c_str(),
+                               storage ? "S" : "-",
+                               storage_aa ? "s" : "-",
+                               sampled ? "I" : "-",
+                               depth ? "D" : "-");
+  }
+  vk_pipeline_diag_logf("DEVICE-FORMATS | %s", format_log);
+}
+
+void VKDevice::init_physical_device_memory_properties()
+{
+  BLI_assert(vk_physical_device_ != VK_NULL_HANDLE);
+  vkGetPhysicalDeviceMemoryProperties(vk_physical_device_, &vk_physical_device_memory_properties_);
+}
+
+void VKDevice::init_physical_device_features()
+{
+  BLI_assert(vk_physical_device_ != VK_NULL_HANDLE);
+
+  VkPhysicalDeviceFeatures2 features = {};
+  features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  vk_physical_device_vulkan_11_features_.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+  vk_physical_device_vulkan_12_features_.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+  features.pNext = &vk_physical_device_vulkan_11_features_;
+  vk_physical_device_vulkan_11_features_.pNext = &vk_physical_device_vulkan_12_features_;
+  vk_physical_device_vulkan_12_features_.pNext =
+      &vk_physical_device_acceleration_structure_features_;
+
+  vkGetPhysicalDeviceFeatures2(vk_physical_device_, &features);
+  vk_physical_device_features_ = features.features;
+}
+
+void VKDevice::init_physical_device_extensions()
+{
+  uint32_t count = 0;
+  vkEnumerateDeviceExtensionProperties(vk_physical_device_, nullptr, &count, nullptr);
+  device_extensions_ = Array<VkExtensionProperties>(count);
+  vkEnumerateDeviceExtensionProperties(
+      vk_physical_device_, nullptr, &count, device_extensions_.data());
+}
+
+bool VKDevice::supports_extension(const char *extension_name) const
+{
+  for (const VkExtensionProperties &vk_extension_properties : device_extensions_) {
+    if (STREQ(vk_extension_properties.extensionName, extension_name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void VKDevice::init_dummy_buffer()
+{
+  dummy_buffer.create(sizeof(float4x4),
+                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+                      1.0f,
+                      false,
+                      "DummyBuffer");
+  /* Default dummy buffer. Set the 4th element to 1 to fix missing orcos. */
+  float data[16] = {
+      0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  dummy_buffer.update_immediately(static_cast<void *>(data));
+}
+
+shader::GeneratedSource VKDevice::extensions_define(StringRefNull stage_define,
+                                                    bool use_ray_query) const
+{
+  std::stringstream ss;
+
+  const bool requires_460 = use_ray_query;
+  if (requires_460) {
+    ss << "#version 460\n";
+  }
+  else {
+    ss << "#version 450\n";
+  }
+  {
+    /* Required extension. */
+    ss << "#extension GL_ARB_shader_draw_parameters : enable\n";
+    ss << "#define GPU_ARB_shader_draw_parameters\n";
+    ss << "#define gpu_BaseInstance (gl_BaseInstanceARB)\n";
+  }
+  ss << "#define GPU_ARB_clip_control\n";
+  ss << "#define GPU_ARB_derivative_control\n";
+
+  ss << "#define gl_VertexID gl_VertexIndex\n";
+  ss << "#define gpu_InstanceIndex (gl_InstanceIndex)\n";
+  ss << "#define gl_InstanceID (gpu_InstanceIndex - gpu_BaseInstance)\n";
+
+  ss << "#extension GL_ARB_shader_viewport_layer_array: enable\n";
+  if (GPU_stencil_export_support()) {
+    ss << "#extension GL_ARB_shader_stencil_export: enable\n";
+    ss << "#define GPU_ARB_shader_stencil_export 1\n";
+  }
+  if (extensions_.fragment_shader_barycentric) {
+    ss << "#extension GL_EXT_fragment_shader_barycentric : require\n";
+    ss << "#define gpu_BaryCoord gl_BaryCoordEXT\n";
+    ss << "#define gpu_BaryCoordNoPersp gl_BaryCoordNoPerspEXT\n";
+  }
+  if (use_ray_query) {
+    ss << "#extension GL_EXT_ray_query : enable\n";
+  }
+  ss << stage_define;
+
+  return shader::GeneratedSource{"gpu_shader_glsl_extension.glsl", {}, ss.str()};
+}
+
+std::string VKDevice::glsl_vertex_patch_get(bool use_ray_query) const
+{
+  shader::GeneratedSourceList sources{
+      extensions_define("#define GPU_VERTEX_SHADER\n", use_ray_query)};
+  return fmt::to_string(fmt::join(
+      gpu_shader_dependency_get_resolved_source("gpu_shader_compat_glsl.glsl", sources), ""));
+}
+
+std::string VKDevice::glsl_geometry_patch_get() const
+{
+  shader::GeneratedSourceList sources{extensions_define("#define GPU_GEOMETRY_SHADER\n", false)};
+  return fmt::to_string(fmt::join(
+      gpu_shader_dependency_get_resolved_source("gpu_shader_compat_glsl.glsl", sources), ""));
+}
+
+std::string VKDevice::glsl_fragment_patch_get(bool use_ray_query) const
+{
+  shader::GeneratedSourceList sources{
+      extensions_define("#define GPU_FRAGMENT_SHADER\n", use_ray_query)};
+  return fmt::to_string(fmt::join(
+      gpu_shader_dependency_get_resolved_source("gpu_shader_compat_glsl.glsl", sources), ""));
+}
+
+std::string VKDevice::glsl_compute_patch_get(bool use_ray_query) const
+{
+  shader::GeneratedSourceList sources{
+      extensions_define("#define GPU_COMPUTE_SHADER\n", use_ray_query)};
+  return fmt::to_string(fmt::join(
+      gpu_shader_dependency_get_resolved_source("gpu_shader_compat_glsl.glsl", sources), ""));
+}
+
+/* -------------------------------------------------------------------- */
+/** \name Platform/driver/device information
+ * \{ */
+
+constexpr int32_t PCI_ID_NVIDIA = 0x10de;
+constexpr int32_t PCI_ID_INTEL = 0x8086;
+constexpr int32_t PCI_ID_AMD = 0x1002;
+constexpr int32_t PCI_ID_ATI = 0x1022;
+constexpr int32_t PCI_ID_APPLE = 0x106b;
+
+GPUDeviceType VKDevice::device_type() const
+{
+  switch (vk_physical_device_driver_properties_.driverID) {
+    case VK_DRIVER_ID_AMD_PROPRIETARY:
+    case VK_DRIVER_ID_AMD_OPEN_SOURCE:
+    case VK_DRIVER_ID_MESA_RADV:
+      return GPU_DEVICE_ATI;
+
+    case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+    case VK_DRIVER_ID_MESA_NVK:
+      return GPU_DEVICE_NVIDIA;
+
+    case VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS:
+    case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+      return GPU_DEVICE_INTEL;
+
+    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
+      return GPU_DEVICE_QUALCOMM;
+
+    case VK_DRIVER_ID_MOLTENVK:
+      return GPU_DEVICE_APPLE;
+
+    case VK_DRIVER_ID_MESA_LLVMPIPE:
+      return GPU_DEVICE_SOFTWARE;
+
+    default:
+      return GPU_DEVICE_UNKNOWN;
+  }
+
+  return GPU_DEVICE_UNKNOWN;
+}
+
+GPUDriverType VKDevice::driver_type() const
+{
+  switch (vk_physical_device_driver_properties_.driverID) {
+    case VK_DRIVER_ID_AMD_PROPRIETARY:
+    case VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS:
+    case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
+    /* NOTE: Marking AMDVLK as an official driver to make distinction between Mesa and AMD open
+     * source. AMDVLK is being replaced by Mesa in the official driver stack. */
+    case VK_DRIVER_ID_AMD_OPEN_SOURCE:
+      return GPU_DRIVER_OFFICIAL;
+
+    case VK_DRIVER_ID_MOLTENVK:
+    case VK_DRIVER_ID_MESA_RADV:
+    case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+    case VK_DRIVER_ID_MESA_NVK:
+      return GPU_DRIVER_OPENSOURCE;
+
+    case VK_DRIVER_ID_MESA_LLVMPIPE:
+      return GPU_DRIVER_SOFTWARE;
+
+    default:
+      return GPU_DRIVER_ANY;
+  }
+
+  return GPU_DRIVER_ANY;
+}
+
+std::string VKDevice::vendor_name() const
+{
+  /* Below 0x10000 are the PCI vendor IDs (https://pcisig.com/membership/member-companies) */
+  if (vk_physical_device_properties_.vendorID < 0x10000) {
+    switch (vk_physical_device_properties_.vendorID) {
+      case PCI_ID_AMD:
+      case PCI_ID_ATI:
+        return "Advanced Micro Devices";
+      case PCI_ID_NVIDIA:
+        return "NVIDIA Corporation";
+      case PCI_ID_INTEL:
+        return "Intel Corporation";
+      case PCI_ID_APPLE:
+        return "Apple";
+      default:
+        return std::to_string(vk_physical_device_properties_.vendorID);
+    }
+  }
+  else {
+    /* above 0x10000 should be vkVendorIDs
+     * NOTE: When debug_messaging landed we can use something similar to
+     * vk::to_string(vk::VendorId(properties.vendorID));
+     */
+    return std::to_string(vk_physical_device_properties_.vendorID);
+  }
+}
+
+std::string VKDevice::driver_version() const
+{
+  return StringRefNull(vk_physical_device_driver_properties_.driverName) + " " +
+         StringRefNull(vk_physical_device_driver_properties_.driverInfo);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name VKThreadData
+ * \{ */
+
+VKThreadData::VKThreadData(VKDevice &device, pthread_t thread_id) : thread_id(thread_id)
+{
+  descriptor_pools.init(device);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Resource management
+ * \{ */
+
+VKThreadData &VKDevice::current_thread_data()
+{
+  std::scoped_lock mutex(resources.mutex);
+  pthread_t current_thread_id = pthread_self();
+
+  for (VKThreadData *thread_data : thread_data_) {
+    if (pthread_equal(thread_data->thread_id, current_thread_id)) {
+      return *thread_data;
+    }
+  }
+
+  VKThreadData *thread_data = new VKThreadData(*this, current_thread_id);
+  thread_data_.append(thread_data);
+  return *thread_data;
+}
+
+void VKDevice::context_register(VKContext &context)
+{
+  contexts_.append(std::reference_wrapper(context));
+}
+
+void VKDevice::context_unregister(VKContext &context)
+{
+  if (context.render_graph_.has_value()) {
+    render_graph::VKRenderGraph &render_graph = context.render_graph();
+    context.render_graph_.reset();
+    BLI_assert_msg(render_graph.is_empty(),
+                   "Unregistering a context that still has an unsubmitted render graph.");
+    render_graph.reset();
+    BLI_thread_queue_push(
+        unused_render_graphs_, &render_graph, BLI_THREAD_QUEUE_WORK_PRIORITY_NORMAL);
+  }
+  {
+    std::scoped_lock lock(orphaned_data.mutex_get());
+    orphaned_data.move_data(context.discard_pool, timeline_value_ + 1);
+  }
+
+  contexts_.remove(contexts_.first_index_of(std::reference_wrapper(context)));
+}
+Span<std::reference_wrapper<VKContext>> VKDevice::contexts_get() const
+{
+  return contexts_;
+};
+
+/**
+ * Touch: can anything in this process allocate out of this heap?
+ *
+ * A heap reachable only through protected memory types is for DRM-protected content. Blender never
+ * allocates from one, so counting it as memory Blender has is simply wrong. Measured on a
+ * Snapdragon 8 Gen 3 (Adreno 750), where the driver reports two device-local heaps:
+ *
+ *   heap[0] 11084 MiB, flags 0x1
+ *   heap[1]  4095 MiB, flags 0x1, reachable only by memoryType[7], propertyFlags 0x21
+ *                                 (DEVICE_LOCAL | PROTECTED)
+ *
+ * Summed, that is the 14.8 GiB the status bar used to report on a phone sold with 12 GB of RAM --
+ * a figure larger than the machine has, describing no pool that exists. A discrete card has one
+ * device-local heap and no protected one, which is why the sum looked right everywhere else.
+ */
+bool VKDevice::memory_heap_is_allocatable(const uint32_t memory_heap_index) const
+{
+  for (const uint32_t type_index :
+       IndexRange(vk_physical_device_memory_properties_.memoryTypeCount))
+  {
+    const VkMemoryType &memory_type =
+        vk_physical_device_memory_properties_.memoryTypes[type_index];
+    if (memory_type.heapIndex != memory_heap_index) {
+      continue;
+    }
+    if (!bool(memory_type.propertyFlags & VK_MEMORY_PROPERTY_PROTECTED_BIT)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void VKDevice::memory_statistics_get(int *r_total_mem_kb, int *r_free_mem_kb) const
+{
+  VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+  vmaGetHeapBudgets(mem_allocator_get(), budgets);
+  VkDeviceSize total_mem = 0;
+  VkDeviceSize used_mem = 0;
+
+  for (int memory_heap_index : IndexRange(vk_physical_device_memory_properties_.memoryHeapCount)) {
+    const VkMemoryHeap &memory_heap =
+        vk_physical_device_memory_properties_.memoryHeaps[memory_heap_index];
+    const VmaBudget &budget = budgets[memory_heap_index];
+
+    /* Skip host memory-heaps. */
+    if (!bool(memory_heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) {
+      continue;
+    }
+
+    /* Touch: and heaps this process cannot allocate from at all. */
+    if (!memory_heap_is_allocatable(memory_heap_index)) {
+      continue;
+    }
+
+    /* Touch: the budget, not the size of the heap.
+     *
+     * VmaBudget::budget is what is actually available to this process -- from
+     * VK_EXT_memory_budget where the driver offers it, and a heuristic otherwise. On a phone the
+     * device-local heap *is* system memory, all of it, shared with Android and every other app,
+     * so its size is not an amount Blender can ever have. The figure asked for here is the memory
+     * available for use, so that is the one reported. */
+    total_mem += budget.budget;
+    used_mem += budget.usage;
+  }
+
+  *r_total_mem_kb = int(total_mem / 1024);
+  /* Touch: a budget can be reported below what is already in use; do not wrap around. */
+  *r_free_mem_kb = int((total_mem > used_mem ? total_mem - used_mem : 0) / 1024);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Debugging/statistics
+ * \{ */
+
+void VKDevice::debug_print() const
+{
+  BLI_assert_msg(BLI_thread_is_main(),
+                 "VKDevice::debug_print can only be called from the main thread.");
+
+  resources.debug_print();
+  std::ostream &os = std::cout;
+  os << "Pipelines\n";
+  os << " Graphics: " << pipelines.graphics_.size() << "\n";
+  os << " Compute: " << pipelines.compute_.size() << "\n";
+  os << " VertexInLib: " << pipelines.vertex_input_libs_.size() << "\n";
+  os << " ShaderLib: " << pipelines.shaders_libs_.size() << "\n";
+  os << " FragmentOutLib: " << pipelines.fragment_output_libs_.size() << "\n";
+  os << "Descriptor sets\n";
+  os << " VkDescriptorSetLayouts: " << descriptor_set_layouts_.size() << "\n";
+  for (const VKThreadData *thread_data : thread_data_) {
+    /* NOTE: Assumption that this is always called form the main thread. This could be solved by
+     * keeping track of the main thread inside the thread data. */
+    const bool is_main = pthread_equal(thread_data->thread_id, pthread_self());
+    os << "ThreadData" << (is_main ? " (main-thread)" : "") << ")\n";
+    os << " Rendering_depth: " << thread_data->rendering_depth << "\n";
+  }
+  os << "Discard pool\n";
+  os << orphaned_data << "\n";
+  os << "Discard pool (render)\n";
+  os << orphaned_data_render << "\n";
+  os << "\n";
+
+  for (const std::reference_wrapper<VKContext> &context : contexts_) {
+    os << " VKContext \n";
+    os << context.get().discard_pool << "\n";
+  }
+
+  int total_mem_kb;
+  int free_mem_kb;
+  memory_statistics_get(&total_mem_kb, &free_mem_kb);
+  os << "\nMemory: total=" << total_mem_kb << ", free=" << free_mem_kb << "\n";
+}
+
+/** \} */
+
+}  // namespace gpu
+}  // namespace blender
