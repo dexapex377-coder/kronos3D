@@ -1,0 +1,392 @@
+name: Android APK Build
+
+on:
+  workflow_dispatch:
+
+# The full Blender cross-build (7642 targets) is expensive (~40 min) and only depends on the
+# Blender source, the NDK and the precompiled libs. The APK assembly itself is a light Gradle
+# step that consumes the staged Gradle project produced by the CMake `gradle_stage` target.
+#
+# To avoid recompiling every Blender target when only the final APK step fails, the pipeline is
+# split in two jobs:
+#   - `build`: CMake configure, full build, install, `gradle_stage`. Publishes the staged Gradle
+#     project as a `gradle-stage` artifact.
+#   - `assemble`: Downloads the artifact, restores Gradle caches and runs `gradlew assembleRelease`.
+#     A failure here only re-runs this job (no Blender recompile).
+#
+# NOTE on Git LFS: the repo tracks release/datafiles, assets, release/android icons and the
+# `gradle-wrapper.jar` through Git LFS (see .gitattributes `*.jar filter=lfs`). When checked out
+# with `lfs: false`, those files end up as ~130 byte pointer stubs. Neither the GitHub mirror raw
+# endpoint nor `raw.githubusercontent.com` serves the real objects (the GitHub LFS store 404s and
+# raw returns the pointer), which is why the final APK step previously failed with
+# `Could not find or load main class org.gradle.wrapper.GradleWrapperMain` (empty wrapper JAR).
+# The real LFS objects are served anonymously from the official Blender Gitea repository
+# (`projects.blender.org`), so we fetch the subset required for the Android build from there
+# using the official `git lfs` mechanism, then verify a few critical files by SHA-256.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repository (the dispatched branch, no LFS)
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          path: blender
+          ref: ${{ github.ref_name }}
+          lfs: false
+
+      - name: Resolve required Git LFS files from the official Blender repository
+        run: |
+          set -o pipefail
+          cd blender
+          git lfs install --local
+          git remote add upstream-lfs https://projects.blender.org/blender/blender.git
+          # Only the files needed by the Android build/runtime. The `install` target copies
+          # release/datafiles and assets into the portable runtime directory; release/android
+          # contains the Gradle skeleton (incl. gradle-wrapper.jar and the webp launcher icons).
+          # tests/, release/windows, release/darwin and doc/ are not needed.
+          INCLUDE="release/android/**,release/datafiles/**,assets/**,scripts/startup/**"
+          git lfs fetch upstream-lfs --include "$INCLUDE"
+          git lfs pull --include "$INCLUDE"
+          echo "LFS files resolved."
+
+      - name: Verify resolved LFS files (gradle wrapper, launcher icons, startup.blend)
+        run: |
+          set -o pipefail
+          cd blender
+          JAR=release/android/gradle/wrapper/gradle-wrapper.jar
+          SZ=$(stat -c%s "$JAR")
+          echo "gradle-wrapper.jar size: $SZ (expected 54213, a stub is 130)"
+          [ "$SZ" = "54213" ] || { echo "ERROR: gradle-wrapper.jar is still an LFS stub"; exit 1; }
+          HASH=$(sha256sum "$JAR" | awk '{print $1}')
+          echo "gradle-wrapper.jar sha256: $HASH"
+          [ "$HASH" = "2c23278a62dc9f96ab11bee897d9f53e6479d6419135e4560ce822a6431df5e5" ] \
+            || { echo "ERROR: gradle-wrapper.jar sha256 mismatch"; exit 1; }
+          python3 -c "import zipfile; z=zipfile.ZipFile('$JAR'); assert 'org/gradle/wrapper/GradleWrapperMain.class' in z.namelist(); print('GradleWrapperMain.class present')"
+          # Launcher icons are referenced by the manifest; aapt2 fails on pointer stubs.
+          for f in $(git ls-files 'release/android/app/src/main/res/mipmap-*/ic_launcher*.webp'); do
+            MAGIC=$(head -c4 "$f" | od -An -tx1 | tr -d ' \n')
+            [ "$MAGIC" = "52494646" ] || { echo "ERROR: $f is still a stub (magic=$MAGIC)"; exit 1; }
+          done
+          echo "Launcher icons OK (RIFF/webp)."
+          SIZE_SB=$(stat -c%s release/datafiles/startup.blend)
+          echo "startup.blend size: $SIZE_SB (real content, not a dummy)"
+          [ "$SIZE_SB" -gt 1024 ] || { echo "ERROR: startup.blend is empty/stub"; exit 1; }
+          echo "=== remaining git modifications (should be empty) ==="
+          git status --short | head -20
+          echo "Required LFS files verified OK."
+
+      - name: Resolve precompiled libs commit IDs
+        id: libs-commit
+        run: |
+          echo "arm=$(git ls-remote https://projects.blender.org/blender/lib-android_arm64.git HEAD | cut -f1)" >> $GITHUB_OUTPUT
+          echo "x64=$(git ls-remote https://projects.blender.org/blender/lib-linux_x64.git HEAD | cut -f1)" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@v4
+        id: cache-libs-android
+        with:
+          path: blender/lib/android_arm64
+          key: libs-android-${{ steps.libs-commit.outputs.arm }}
+
+      - uses: actions/cache/restore@v4
+        id: cache-libs-x64
+        with:
+          path: blender/lib/linux_x64
+          key: libs-x64-${{ steps.libs-commit.outputs.x64 }}
+
+      - name: Clone precompiled libs (Android ARM64 — target build)
+        if: steps.cache-libs-android.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          git clone --depth 1 https://projects.blender.org/blender/lib-android_arm64.git blender/lib/android_arm64
+          cd blender/lib/android_arm64
+          git lfs install
+          git lfs pull
+
+      - name: Clone precompiled libs (Linux x64 — host_tools)
+        if: steps.cache-libs-x64.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          git clone --depth 1 https://projects.blender.org/blender/lib-linux_x64.git blender/lib/linux_x64
+          cd blender/lib/linux_x64
+          git lfs install
+          git lfs pull
+
+      - uses: actions/cache/save@v4
+        if: steps.cache-libs-android.outputs.cache-hit != 'true'
+        with:
+          path: blender/lib/android_arm64
+          key: libs-android-${{ steps.libs-commit.outputs.arm }}
+
+      - uses: actions/cache/save@v4
+        if: steps.cache-libs-x64.outputs.cache-hit != 'true'
+        with:
+          path: blender/lib/linux_x64
+          key: libs-x64-${{ steps.libs-commit.outputs.x64 }}
+
+      - name: Verify libs
+        run: |
+          set -o pipefail
+          SIZE_ARM=$(stat -c%s blender/lib/android_arm64/zstd/lib/libzstd.a 2>/dev/null || echo 0)
+          echo "ARM64 zstd.a: $SIZE_ARM bytes"
+          SIZE_X64=$(stat -c%s blender/lib/linux_x64/zstd/lib/libzstd.a 2>/dev/null || echo 0)
+          echo "x64 zstd.a: $SIZE_X64 bytes"
+          if [ "$SIZE_ARM" -lt 1000 ] || [ "$SIZE_X64" -lt 1000 ]; then
+            echo "ERROR: LFS pointer not resolved"
+            exit 1
+          fi
+          echo "Both libs OK"
+
+      - name: Setup NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r30-beta1
+          link-to-sdk: true
+
+      - name: Verify NDK and Vulkan Headers
+        run: |
+          set -o pipefail
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "========================================"
+          echo "1. ANDROID_NDK_ROOT: $NDK_PATH"
+          echo "Output ndk-full-version: ${{ steps.setup-ndk.outputs.ndk-full-version }}"
+          echo "========================================"
+          echo "2. NDK source.properties:"
+          cat "$NDK_PATH/source.properties"
+          echo "========================================"
+          echo "3. Clang version:"
+          CLANG_BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          if [ -x "$CLANG_BIN" ]; then
+            "$CLANG_BIN" --version
+          else
+            echo "Clang binary not found at standard path, searching..."
+            find "$NDK_PATH" -name "clang" -type f
+          fi
+          echo "========================================"
+          echo "4. vulkan_core.h path and version:"
+          VK_HEADER="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/vulkan/vulkan_core.h"
+          echo "vulkan_core.h path: $VK_HEADER"
+          if [ -f "$VK_HEADER" ]; then
+            echo "VK_HEADER_VERSION:"
+            grep "#define VK_HEADER_VERSION " "$VK_HEADER"
+            echo "========================================"
+            echo "5. Checking required Vulkan features:"
+            grep -Hn "VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT" "$VK_HEADER"
+            grep -Hn "VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR" "$VK_HEADER"
+            grep -Hn "VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME" "$VK_HEADER"
+            grep -Hn "VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME" "$VK_HEADER"
+            echo "Vulkan types and extensions check PASSED."
+          else
+            echo "ERROR: vulkan_core.h not found at $VK_HEADER"
+            exit 1
+          fi
+          echo "========================================"
+
+      - name: Install host build tools
+        run: |
+          set -o pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14 ninja-build pkg-config python3-dev
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          gcc --version | head -1
+          g++ --version | head -1
+
+      - name: Setup Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: ${{ runner.os }}-blender-android
+          max-size: 4G
+
+      # NOTE: no cache for blender/build. A restored ninja tree kept a stale
+      # build.ninja (mtime equal to the checked-out CMakeLists after cache
+      # extraction) so cmake never reconfigured: the link missed the new NDK
+      # glue object and libblender.so shipped without ANativeActivity_onCreate
+      # (crash on device: "undefined symbol"). ccache above is enough.
+
+      - name: Configure CMake
+        id: cmake-attempt1
+        run: |
+          set -o pipefail
+          cd blender
+          cmake -B build \
+            -S . \
+            -DTARGET_ANDROID=ON \
+            -DCMAKE_TOOLCHAIN_FILE=build_files/cmake/platform/platform_android_toolchain.cmake \
+            -DANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }} \
+            -DCMAKE_INSTALL_PREFIX=install \
+            -C build_files/cmake/config/blender_release.cmake \
+            -DWITH_TESTS=OFF \
+            -DWITH_PYTHON_INSTALL=ON \
+            -DWITH_COMPILER_CCACHE=ON \
+            -DWITH_CYCLES_OSL=OFF \
+            -DWITH_GHOST_X11=OFF \
+            -DPYTHON_VERSION=3.13 \
+            -DPYTHON_EXECUTABLE=$(which python3) \
+            -DTEST_PYTHON_EXE=$(which python3) \
+            -GNinja 2>&1 | tee cmake_config.log
+
+      - name: Handle CMake failure
+        if: steps.cmake-attempt1.outcome == 'failure'
+        run: |
+          cat cmake_config.log
+          exit 1
+
+      - name: Build and stage Gradle project
+        if: steps.cmake-attempt1.outcome == 'success'
+        run: |
+          set -o pipefail
+          cd blender
+          cmake --build build --target install 2>&1 | tee build.log
+          cmake --build build --target gradle_stage 2>&1 | tee gradle_stage.log
+
+      - name: Package staged Gradle project
+        if: steps.cmake-attempt1.outcome == 'success'
+        run: |
+          set -o pipefail
+          cd blender/build/gradle
+          # The staged project embeds machine-specific settings from the build job runner, and
+          # Gradle intermediates that the `assemble` job must regenerate.
+          rm -f local.properties
+          cd ..
+          tar -I 'zstd -T0' -cf ../gradle-stage.tar.zst \
+            --exclude='gradle/**/.gradle' \
+            --exclude='gradle/app/build' \
+            gradle
+          echo "Staged size: $(du -sh ../gradle-stage.tar.zst | awk '{print $1}')"
+
+      - name: Upload staged Gradle project
+        if: steps.cmake-attempt1.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-stage
+          path: blender/gradle-stage.tar.zst
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            blender/cmake_config*.log
+            blender/build.log
+            blender/gradle_stage.log
+            *.log
+          if-no-files-found: ignore
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download staged Gradle project
+        uses: actions/download-artifact@v4
+        with:
+          name: gradle-stage
+
+      - name: Extract staged Gradle project
+        run: |
+          set -o pipefail
+          # download-artifact@v4 unzips the artifact contents directly into $GITHUB_WORKSPACE
+          # (no subfolder for single artifacts), so the tarball lands in the workspace root.
+          ls -la
+          mkdir -p stage
+          tar -I zstd -xf gradle-stage.tar.zst -C stage
+          chmod +x stage/gradle/gradlew
+          echo "Staged layout:"
+          ls stage/gradle
+
+      - name: Verify Gradle wrapper integrity in the staged project
+        run: |
+          set -o pipefail
+          JAR=stage/gradle/gradle/wrapper/gradle-wrapper.jar
+          SZ=$(stat -c%s "$JAR")
+          echo "gradle-wrapper.jar size: $SZ (expected 54213)"
+          [ "$SZ" = "54213" ] || { echo "ERROR: gradle-wrapper.jar is an LFS stub"; exit 1; }
+          python3 -c "import zipfile; z=zipfile.ZipFile('$JAR'); assert 'org/gradle/wrapper/GradleWrapperMain.class' in z.namelist(); print('GradleWrapperMain.class present')"
+          echo "Gradle wrapper OK"
+          echo "--- gradle-wrapper.properties ---"
+          cat stage/gradle/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Gradle Wrapper distributions
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper
+          # The distribution version is pinned in gradle-wrapper.properties (Gradle 9.4.1).
+          key: gradle-wrapper-${{ hashFiles('stage/gradle/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-wrapper-
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          # Keyed on the pinned Gradle + AGP configuration so incompatible dependency sets are
+          # never reused (exact key only, no restore-key fallback). AGP is pinned to 9.2.0 in
+          # build.gradle and the wrapper to Gradle 9.4.1.
+          key: gradle-caches-${{ hashFiles('stage/gradle/gradle/wrapper/gradle-wrapper.properties','stage/gradle/build.gradle','stage/gradle/settings.gradle','stage/gradle/gradle.properties','stage/gradle/app/build.gradle') }}
+
+      - name: Ensure Android SDK build platform is available
+        run: |
+          set -o pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          if [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            echo "platforms;android-36 present"
+          else
+            echo "platforms;android-36 missing — installing (licenses are pre-accepted on runners)"
+            SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            if [ -x "$SDKM" ]; then
+              yes | "$SDKM" "platforms;android-36"
+            else
+              echo "sdkmanager not found; letting AGP auto-download instead"
+            fi
+          fi
+
+      - name: Assemble APK
+        run: |
+          set -o pipefail
+          cd stage/gradle
+          ./gradlew assembleRelease \
+            -PblenderVersionName=5.2.0 \
+            -PblenderVersionCode=5020000 \
+            -PblenderMinSdk=29 2>&1 | tee gradle.log
+
+      - name: Find APK
+        id: find-apk
+        run: |
+          APK=$(find stage/gradle -name "app-release.apk" 2>/dev/null | head -1)
+          echo "apk_path=$APK"
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+
+      - name: Upload APK
+        if: steps.find-apk.outputs.apk_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-android-apk
+          path: ${{ steps.find-apk.outputs.apk_path }}
+
+      - name: Upload Gradle logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-logs
+          path: |
+            stage/gradle/gradle.log
+            gradle-stage.tar.zst
+          if-no-files-found: ignore
