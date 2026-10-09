@@ -63,6 +63,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -144,6 +145,11 @@ object ShortcutsOverlay {
                 onDismiss = { hide() },
                 onTypeText = { text -> activity.commitText(text) },
                 onBackspace = { activity.sendDeleteKey() },
+                onLatchModifier = { id, pressed ->
+                    KEY_TABLE[id]?.takeIf { it.meta != 0 }?.let {
+                        activity.setModifierLatched(it.keyCode, pressed)
+                    }
+                },
             )
         }
     }
@@ -646,6 +652,8 @@ private fun ShortcutsPanel(
     onTypeText: (String) -> Unit = {},
     /** Backspace for the on-screen keyboard. */
     onBackspace: () -> Unit = {},
+    /** Press or release one modifier key and leave it that way, for toggle shortcuts. */
+    onLatchModifier: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
 
@@ -872,6 +880,7 @@ private fun ShortcutsPanel(
                                 GridShortcutCard(
                                     item = item,
                                     isDeleteMode = isDeleteMode,
+                                    isLatched = latchedCombo == item.combo && latchedMeta.value != 0,
                                     onClick = {
                                         if (isDeleteMode) {
                                             shortcuts.remove(item)
@@ -887,15 +896,23 @@ private fun ShortcutsPanel(
                                                     android.widget.Toast.LENGTH_SHORT,
                                                 ).show()
                                             } else if (item.toggle) {
-                                                /* Tap on: fire the key, then hold the
-                                                 * modifiers. Tap again: release them. */
-                                                val meta = metaOfCombo(item.combo)
-                                                if (latchedCombo == item.combo && latchedMeta.value != 0) {
+                                                /* Tap: latch the modifiers for real, so the next
+                                                 * tap in the 3D view is a genuine shift-click.
+                                                 * Tap again: release. Only the modifiers move; the
+                                                 * shortcut's own key is not fired, because the
+                                                 * point is to hold a modifier, not to run an
+                                                 * operator once. */
+                                                val isOn = latchedCombo == item.combo && latchedMeta.value != 0
+                                                if (isOn) {
+                                                    item.combo.forEach { onLatchModifier(it, false) }
                                                     latchedMeta.value = 0
                                                     latchedCombo = emptyList()
                                                 } else {
-                                                    onSendCombo(item.combo)
-                                                    latchedMeta.value = meta
+                                                    /* Releasing whatever else was held first keeps
+                                                     * Ctrl and Shift from stacking silently. */
+                                                    latchedCombo.forEach { id -> onLatchModifier(id, false) }
+                                                    item.combo.forEach { onLatchModifier(it, true) }
+                                                    latchedMeta.value = metaOfCombo(item.combo)
                                                     latchedCombo = item.combo
                                                 }
                                             } else {
@@ -1053,7 +1070,13 @@ private fun GridScrollbar(
 }
 
 @Composable
-private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick: () -> Unit) {
+private fun GridShortcutCard(
+    item: GridShortcut,
+    isDeleteMode: Boolean,
+    /** Held right now by a toggle: the modifier is down in Blender. */
+    isLatched: Boolean = false,
+    onClick: () -> Unit,
+) {
     // Keys with no KEY_TABLE entry cannot be sent. Previously these were dropped at
     // load time; now the card stays and says so, so the gap is visible instead of
     // silently losing the shortcut or doing nothing when tapped.
@@ -1062,9 +1085,14 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
 
     Surface(
         shape = RoundedCornerShape(6.dp),
-        color = if (isDeleteMode) Color(0xCCB71C1C) else CardFace,
-        border = BorderStroke(1.dp, when {
+        color = if (isDeleteMode) Color(0xCCB71C1C)
+        else if (isLatched) Color(0x33FF9100)
+        else CardFace,
+        border = BorderStroke(if (isLatched) 2.dp else 1.dp, when {
             isDeleteMode -> DangerRed
+            /* Un latched modifier is live in the scene right now, so it outranks the
+             * unmapped warning: this is the one state that changes what Blender does. */
+            isLatched -> Amber
             broken -> Color(0xFFCC8800)
             else -> CardBorder
         }),
@@ -1090,10 +1118,15 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
             Text(
                 text = when {
                     isDeleteMode -> "Borrar"
+                    isLatched -> "MANTENIDA"
                     broken -> "Sin mapear"
                     else -> item.keyHint
                 },
-                color = if (broken) Color(0xFFCC8800) else Color(0xFF90A4AE),
+                color = when {
+                    isLatched -> Amber
+                    broken -> Color(0xFFCC8800)
+                    else -> Color(0xFF90A4AE)
+                },
                 fontSize = 7.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1114,20 +1147,52 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
  * while it is up the viewport is deliberately inert, which is what you want while
  * picking a combination.
  */
-/** Small square button with an arrow glyph, used to nudge the typing sheet. */
+/**
+ * Drag handle for the typing keyboard: chevrons up and down, tappable for a nudge and
+ * draggable to place it freely. Larger than the plain bar handle because this one is
+ * the only way to move the sheet and it has to be grabbable with a thumb.
+ */
 @Composable
-private fun MoveArrow(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Surface(shape = RoundedCornerShape(6.dp), color = CardFace) {
+private fun KeyboardNudge(onDragDelta: (Float) -> Unit) {
+    var lastY by remember { mutableFloatStateOf(0f) }
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = Color(0xFF1E242E),
+        border = BorderStroke(1.dp, PanelBorder),
+    ) {
         Box(
-            modifier = Modifier.size(width = 30.dp, height = 30.dp).clickable(onClick = onClick),
+            modifier = Modifier
+                .size(width = 40.dp, height = 34.dp)
+                .pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { lastY = it.y },
+                        onDragEnd = { },
+                        onDragCancel = { },
+                    ) { change, amount ->
+                        change.consume()
+                        lastY += amount.y
+                        onDragDelta(amount.y)
+                    }
+                },
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = Color(0xFF90A4AE),
-                modifier = Modifier.size(16.dp),
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(0.dp),
+            ) {
+                Icon(
+                    Icons.Default.KeyboardArrowUp,
+                    contentDescription = "Mover teclado",
+                    tint = Color(0xFF90A4AE),
+                    modifier = Modifier.size(15.dp),
+                )
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = Color(0xFF90A4AE),
+                    modifier = Modifier.size(15.dp),
+                )
+            }
         }
     }
 }
@@ -1162,14 +1227,13 @@ private fun VisualKeyboard(
     /* Drag the sheet up and down by its handle. The sheet lives in a Dialog, so it is not
      * a window that can be moved the way the panel is; translating the surface inside its
      * own bounds is what keeps the handle useful without a second window. */
-    var dragOffset by remember { mutableStateOf(0.dp) }
+    val dragOffset = remember { mutableStateOf(0.dp) }
     var dragStart by remember { mutableStateOf(0.dp) }
     val maxDrag = 160.dp
     val minDrag = (-160).dp
     /* Las flechas mueven exactamente el mismo offset que el handle de arrastre: mismo
      * mecanismo, stepped en lugar de continuo. Se anula al tocar cualquier tecla para que
      * escribir no requiera mover el teclado antes. */
-    val nudgeBy: (Int) -> Unit = { dp -> dragOffset = (dragOffset + dp.dp).coerceIn(minDrag, maxDrag) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1193,7 +1257,7 @@ Box(
                 // owns dismissal, the sheet itself must not bubble into it.
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset { IntOffset(0, dragOffset.toPx().roundToInt()) }
+                    .offset { IntOffset(0, dragOffset.value.toPx().roundToInt()) }
                     .clickable(enabled = false) {},
                 color = Color(0xFF14171C),
                 shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
@@ -1256,13 +1320,17 @@ Box(
                                     .width(26.dp)
                                     .height(24.dp)
                                     .pointerInput(Unit) {
+                                        /* onDragEnd used to reset the offset to 0, which is
+                                         * why the sheet jumped back instead of staying put --
+                                         * "saltitos". The committed position is kept and only
+                                         * the in-flight delta is tracked here. */
                                         detectDragGestures(
-                                            onDragStart = { dragStart = dragOffset },
-                                            onDragEnd = { dragOffset = 0.dp },
-                                            onDragCancel = { dragOffset = 0.dp },
+                                            onDragStart = { dragStart = dragOffset.value },
+                                            onDragEnd = { },
+                                            onDragCancel = { },
                                         ) { change, amount ->
                                             change.consume()
-                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(minDrag, maxDrag)
+                                            dragOffset.value = (dragStart + amount.y.toDp()).coerceIn(minDrag, maxDrag)
                                         }
                                     },
                                 contentAlignment = Alignment.Center,
@@ -1309,16 +1377,25 @@ Box(
                              * handle de arrastre porque mover el teclado es una acción
                              * repetida, no un gesto continuo. */
                             if (typingMode) {
-                                MoveArrow(Icons.Default.KeyboardArrowUp, "Subir") { nudgeBy(40) }
-                                MoveArrow(Icons.Default.KeyboardArrowDown, "Bajar") { nudgeBy(-40) }
+                                /* Un solo tirador con flechas arriba/abajo: se puede tocar
+                                 * para mover a pasos o mantener pulsado y arrastrar, que es lo
+                                 * que hace falta para recolocar el teclado de una vez. */
+                                KeyboardNudge(
+                                    onDragDelta = { dyPx ->
+                                        dragOffset.value = (dragOffset.value + dyPx.toDp())
+                                            .coerceIn(minDrag, maxDrag)
+                                    },
+                                )
                             }
-                            Surface(
+                            /* En modo escritura el OK no se dibuja: solo hace falta la X.
+                             * Antes se quedaba visible albeit deshabilitado. */
+                            if (!typingMode) Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (selectedKeyIds.isNotEmpty() && !typingMode) Teal else CardFace,
+                                color = if (selectedKeyIds.isNotEmpty()) Teal else CardFace,
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .clickable(enabled = selectedKeyIds.isNotEmpty() && !typingMode) {
+                                        .clickable(enabled = selectedKeyIds.isNotEmpty()) {
                                             // toList(): this is the live keyboard
                                             // selection. Handing over the
                                             // reference made a saved shortcut

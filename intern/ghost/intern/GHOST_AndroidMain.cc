@@ -308,6 +308,29 @@ extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSe
 
 /* A .blend tapped in a file manager while Blender is already running, forwarded from
  * BlenderActivity.onNewIntent on the Android UI thread. */
+/* Latch a modifier down or up without sending any key, and without releasing it.
+ *
+ * nativeSendKeyCombo() always ends by releasing its modifiers, because a shortcut is a
+ * complete gesture. A toggle shortcut is not: it presses Shift and holds it so the next
+ * tap in the 3D view is a genuine shift-click, the way holding Shift on a keyboard does.
+ * Blender's keymap reads getModifierKeys(), which GHOST fills from modifier key events
+ * it has seen, so a modifier that is never sent stays invisible no matter what meta bits
+ * the following events carry.
+ *
+ * meta_state is passed through unchanged for the down and forced to 0 for the up, so a
+ * latch release cannot leave a stale modifier behind for the next input. */
+extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSetModifierLatched(
+    JNIEnv * /*env*/, jobject /*thiz*/, jint modifier_keycode, jboolean pressed, jint meta_state)
+{
+  GHOST_SystemAndroid *system = android_system_if_ready();
+  if (!system || modifier_keycode == 0) {
+    return;
+  }
+  system->handleJavaKeyEvent(modifier_keycode,
+                            pressed ? AKEY_EVENT_ACTION_DOWN : AKEY_EVENT_ACTION_UP,
+                            pressed ? meta_state : 0);
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOpenMainFile(
     JNIEnv *env, jobject /*thiz*/, jstring path)
 {

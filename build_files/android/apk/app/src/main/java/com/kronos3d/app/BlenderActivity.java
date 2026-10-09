@@ -98,6 +98,20 @@ public class BlenderActivity extends NativeActivity {
    * commitText() is never called for it. It forwards to the same handleTextInput()
    * the IME uses, which lands in the active text field.
    */
+  private native void nativeSetModifierLatched(int modifierKeycode, boolean pressed, int metaState);
+
+  /**
+   * Press or release a modifier and leave it that way.
+   *
+   * <p>Used by toggle shortcuts: tapping one holds Shift so the next tap in the 3D view
+   * is a real shift-click, and tapping it again lets go. Sending the modifier only as a
+   * meta bit does not work, because Blender's keymap is evaluated from which modifier
+   * keys GHOST has seen, and a bit without a matching key event leaves that view stale.
+   */
+  public void setModifierLatched(int modifierKeycode, boolean pressed) {
+    nativeSetModifierLatched(modifierKeycode, pressed, 0);
+  }
+
   public void commitText(String text) {
     if (text == null || text.isEmpty()) {
       return;
