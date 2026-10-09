@@ -936,7 +936,7 @@ private fun ShortcutsPanel(
                 if (typingMode) {
                     val meta = metaOfCombo(listOf(id))
                     val key = KEY_TABLE[id]
-                    val code = key?.code ?: 0
+                    val code = key?.keyCode ?: 0
                     val metaOnly = key == null || key.meta != 0
                     when {
                         id == "bksp" || id == "del" -> onBackspace()
