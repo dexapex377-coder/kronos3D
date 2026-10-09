@@ -111,3 +111,8 @@
 *.rgb filter=lfs diff=lfs merge=lfs -text
 *.btx filter=lfs diff=lfs merge=lfs -text
 scripts/modules/_bpy_internal/assets/remote_library/*_openapi.py linguist-generated=true
+
+# These are upstream LFS objects that are not available from any server, and the
+# Android target neither builds nor runs them. Untracking the filter lets the branch be
+# pushed while keeping the directory tree that CMakeLists.txt needs.
+tests/files/** -filter -diff -merge text

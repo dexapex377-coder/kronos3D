@@ -211,6 +211,17 @@ PointerRNA *WM_gizmo_operator_set(wmGizmo *gz,
   if (gzop.ptr) {
     WM_operator_properties_free(&gzop.ptr);
   }
+  /* Guard: WM_operator_properties_create_ptr dereferences ot immediately, so a gizmo that
+   * asks to bind an operator that was not registered crashes the app on the very first
+   * draw, before anything is interactive. Upstream has no check here.
+   *
+   * ptr is an embedded PointerRNA rather than a pointer, so &gzop.ptr stays valid and the
+   * callers that write properties into the result keep working: the gizmo simply comes up
+   * inert instead of taking the process down. */
+  if (ot == nullptr) {
+    gzop.type = nullptr;
+    return &gzop.ptr;
+  }
   gzop.ptr = WM_operator_properties_create_ptr(ot);
 
   if (properties) {
