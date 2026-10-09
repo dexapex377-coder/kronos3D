@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
@@ -141,6 +142,8 @@ object ShortcutsOverlay {
                     activity.sendShortcutKey(key.keyCode, key.meta)
                 },
                 onDismiss = { hide() },
+                onTypeText = { text -> activity.commitText(text) },
+                onBackspace = { activity.sendDeleteKey() },
             )
         }
     }
@@ -438,7 +441,9 @@ private val KEY_TABLE: Map<String, AndroidKey> = buildMap {
     put("right", KeyEvent.KEYCODE_DPAD_RIGHT)
 
     for (i in 0..9) put("$i", KeyEvent.KEYCODE_0 + i)
-    for (i in 1..9) put("f$i", KeyEvent.KEYCODE_F1 + (i - 1))
+    /* 1..12, not 1..9: F10-F12 fell outside the range and were reported as unmapped even
+     * though the native side maps them and Android keycodes run contiguously from F1. */
+    for (i in 1..12) put("f$i", KeyEvent.KEYCODE_F1 + (i - 1))
 
     for (c in 'a'..'z') put(c.toString(), KeyEvent.KEYCODE_A + (c - 'a'))
 
@@ -489,6 +494,15 @@ private data class GridShortcut(
     val label: String,
     val combo: List<String>,
     val icon: ImageVector = Icons.Default.Star,
+    /**
+     * Latch the modifiers instead of releasing them after the key.
+     *
+     * For a toggle the shortcut is half a gesture: tap the shortcut to hold Shift, tap
+     * again to drop it, then use the 3D view with the modifier stuck. That is why this
+     * lives on the shortcut rather than on the composer: the composer builds a
+     * combination and is done with it, the grid is where you re-fire one.
+     */
+    val toggle: Boolean = false,
 ) {
     /**
      * Stable and unique.
@@ -501,7 +515,7 @@ private data class GridShortcut(
      * on the second one. The name disambiguates the common case, and the position
      * finishes it so a duplicate name with a duplicate combo is still legal.
      */
-    val id: String get() = label + "\u0000" + combo.joinToString("+")
+    val id: String get() = label + "\u0000" + combo.joinToString("+") + if (toggle) "\u0001" else ""
 
     /**
      * Human-readable combo, e.g. "Shift+A".
@@ -555,8 +569,15 @@ private object ShortcutStore {
             .filter { it.isNotBlank() }
             .mapNotNull { entry ->
                 val parts = entry.split('|')
-                if (parts.size != 2) return@mapNotNull null
-                GridShortcut(label = parts[0], combo = parts[1].split('+').filter { it.isNotBlank() })
+                /* Accept 2 or 3 fields: the third is the toggle flag. Rejecting size != 2
+                 * here silently dropped every toggle shortcut on the next launch, because
+                 * save() now writes three fields. */
+                if (parts.size < 2 || parts.size > 3) return@mapNotNull null
+                GridShortcut(
+                    label = parts[0],
+                    combo = parts[1].split('+').filter { it.isNotBlank() },
+                    toggle = parts.size > 2 && parts[2] == "1",
+                )
             }
             .toMutableList()
     }
@@ -564,7 +585,7 @@ private object ShortcutStore {
     fun save(context: Context, shortcuts: List<GridShortcut>) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY, shortcuts.joinToString(";") { "${it.label}|${it.combo.joinToString("+")}" })
+            .putString(KEY, shortcuts.joinToString(";") { "${it.label}|${it.combo.joinToString("+")}|${if (it.toggle) 1 else 0}" })
             .apply()
     }
 }
@@ -621,6 +642,10 @@ private fun ShortcutsPanel(
     onDrag: (dx: Float, dy: Float) -> Unit,
     onSendCombo: (List<String>) -> Unit,
     onDismiss: () -> Unit,
+    /** Writes one character into the active Blender text field. */
+    onTypeText: (String) -> Unit = {},
+    /** Backspace for the on-screen keyboard. */
+    onBackspace: () -> Unit = {},
 ) {
     val context = LocalContext.current
 
@@ -641,6 +666,27 @@ private fun ShortcutsPanel(
         mutableStateListOf<GridShortcut>().apply { addAll(ShortcutStore.load(context)) }
     }
     fun persist() = ShortcutStore.save(context, shortcuts)
+
+    /* Modifiers currently latched by a toggle shortcut, and the key each one was
+     * latched with. A toggle fires its key first and then holds the modifiers, so the
+     * 3D view keeps seeing them until the shortcut is tapped again. */
+    /* Text keyboard vs shortcut composer. Same layout, different job; the flag decides
+     * whether OK/latch exist and whether a tap writes or builds a combination. */
+    var typingMode by remember { mutableStateOf(false) }
+
+    val latchedMeta = remember { mutableStateOf(0) }
+    var latchedKeyCode by remember { mutableIntStateOf(0) }
+    var latchedCombo by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    fun metaOfCombo(combo: List<String>): Int =
+        combo.fold(0) { acc, id ->
+            acc or when (id) {
+                "shift_l", "shift_r" -> android.view.KeyEvent.META_SHIFT_ON
+                "ctrl_l", "ctrl_r" -> android.view.KeyEvent.META_CTRL_ON
+                "alt_l", "alt_r" -> android.view.KeyEvent.META_ALT_ON
+                else -> 0
+            }
+        }
 
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -688,7 +734,7 @@ private fun ShortcutsPanel(
                             modifier = Modifier
                                 .size(26.dp)
                                 .background(Teal, RoundedCornerShape(6.dp))
-                                .clickable { selectedKeyIds.clear(); showKeyboard = true },
+                                .clickable { selectedKeyIds.clear(); latchedModifierIds.clear(); typingMode = false; showKeyboard = true },
                             contentAlignment = Alignment.Center,
                         ) {
                             Icon(
@@ -696,6 +742,27 @@ private fun ShortcutsPanel(
                                 contentDescription = "New Shortcut",
                                 tint = Color.White,
                                 modifier = Modifier.size(15.dp),
+                            )
+                        }
+                        /* Teclado de escritura: el mismo layout que el compositor, pero cada
+                         * tecla escribe al tocarse y solo se cierra con la X. */
+                        Box(
+                            modifier = Modifier
+                                .size(26.dp)
+                                .background(CardFace, RoundedCornerShape(6.dp))
+                                .clickable {
+                                    selectedKeyIds.clear()
+                                    latchedModifierIds.clear()
+                                    typingMode = true
+                                    showKeyboard = true
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Default.Keyboard,
+                                contentDescription = "Teclado para escribir",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp),
                             )
                         }
                         Box(
@@ -820,7 +887,23 @@ private fun ShortcutsPanel(
                                                         missing.joinToString("+") { keyLabel(it) ?: it },
                                                     android.widget.Toast.LENGTH_SHORT,
                                                 ).show()
+                                            } else if (item.toggle) {
+                                                /* Tap on: fire the key, then hold the
+                                                 * modifiers. Tap again: release them. */
+                                                val meta = metaOfCombo(item.combo)
+                                                if (latchedCombo == item.combo && latchedMeta.value != 0) {
+                                                    latchedMeta.value = 0
+                                                    latchedCombo = emptyList()
+                                                } else {
+                                                    onSendCombo(item.combo)
+                                                    latchedMeta.value = meta
+                                                    latchedCombo = item.combo
+                                                }
                                             } else {
+                                                /* A non-toggle shortcut must not inherit a
+                                                 * modifier left latched by another one. */
+                                                latchedMeta.value = 0
+                                                latchedCombo = emptyList()
                                                 onSendCombo(item.combo)
                                             }
                                         }
@@ -845,9 +928,28 @@ private fun ShortcutsPanel(
     if (showKeyboard) {
         VisualKeyboard(
             selectedKeyIds = selectedKeyIds,
+            typingMode = typingMode,
+            onCommitText = onTypeText,
+            /* En modo escritura la tecla escribe al tocarse y no se queda marcada:
+             * mantener Shift entre letras haria imposible escribir palabras. Los
+             * modificadores se aplican al caracter y se sueltan en el acto. */
             onKeyToggle = { id ->
-                if (selectedKeyIds.contains(id)) selectedKeyIds.remove(id)
-                else selectedKeyIds.add(id)
+                if (typingMode) {
+                    val meta = metaOfCombo(listOf(id))
+                    val key = KEY_TABLE[id]
+                    when {
+                        id == "bksp" || id == "del" -> onBackspace()
+                        /* A lone modifier has no character of its own. As a keycode it is
+                         * meaningless to a text field, and keyCode 0 is dropped natively,
+                         * so the best a lone Shift can do is nothing. */
+                        key == null || key.meta != 0 -> Unit
+                        key.code == KeyEvent.KEYCODE_SPACE -> onTypeText(" ")
+                        else -> onTypeText(keyLabel(id).orEmpty())
+                    }
+                } else {
+                    if (selectedKeyIds.contains(id)) selectedKeyIds.remove(id)
+                    else selectedKeyIds.add(id)
+                }
             },
             onClearAll = { selectedKeyIds.clear(); latchedModifierIds.clear() },
             latchedModifierIds = latchedModifierIds,
@@ -871,7 +973,7 @@ private fun ShortcutsPanel(
         SaveShortcutNameDialog(
             keyCombo = pendingCombo.mapNotNull { keyLabel(it) }.distinct().joinToString("+"),
             onDismiss = { showNameDialog = false },
-            onSave = { name ->
+            onSave = { name, isToggle ->
                 // toList() here too, so a saved combo can never alias pendingCombo or
                 // the keyboard's live selection: a shared list meant the next key
                 // tapped in the composer retroactively edited an already-saved
@@ -879,7 +981,7 @@ private fun ShortcutsPanel(
                 // overwrote it instead of appending.
                 val combo = pendingCombo.toList()
                 val existing = shortcuts.indexOfFirst { it.combo == combo }
-                val shortcut = GridShortcut(label = name, combo = combo)
+                val shortcut = GridShortcut(label = name, combo = combo, toggle = isToggle)
                 if (existing >= 0) shortcuts[existing] = shortcut else shortcuts.add(shortcut)
                 // Start the next composer from empty, otherwise the previous
                 // selection is still there and OK re-saves that combo instead.
@@ -1011,6 +1113,24 @@ private fun GridShortcutCard(item: GridShortcut, isDeleteMode: Boolean, onClick:
  * while it is up the viewport is deliberately inert, which is what you want while
  * picking a combination.
  */
+/** Small square button with an arrow glyph, used to nudge the typing sheet. */
+@Composable
+private fun MoveArrow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Surface(shape = RoundedCornerShape(6.dp), color = CardFace) {
+        Box(
+            modifier = Modifier.size(width = 30.dp, height = 30.dp).clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = Color(0xFF90A4AE),
+                modifier = Modifier.size(16.dp),
+            )
+        }
+    }
+}
+
 @Composable
 private fun VisualKeyboard(
     selectedKeyIds: List<String>,
@@ -1021,6 +1141,14 @@ private fun VisualKeyboard(
     /** Modifier key ids latched on: they stay in the combination until untoggled. */
     latchedModifierIds: List<String>,
     onToggleLatch: () -> Unit,
+    /**
+     * Text-entry mode: same layout, different job. No OK button (each key commits as it
+     * is tapped), arrows to move the sheet, and modifier taps that latch nothing, since
+     * holding Shift between two letters would be unusable when typing words.
+     */
+    typingMode: Boolean = false,
+    onCommitText: (String) -> Unit = {},
+    onBackspace: () -> Unit = {},
 ) {
     val keyLookup = remember { mutableStateListOf<Pair<String, String>>() }
     if (keyLookup.isEmpty()) {
@@ -1036,6 +1164,10 @@ private fun VisualKeyboard(
     var dragOffset by remember { mutableStateOf(0.dp) }
     var dragStart by remember { mutableStateOf(0.dp) }
     val maxDrag = 160.dp
+    /* Las flechas mueven exactamente el mismo offset que el handle de arrastre: mismo
+     * mecanismo, stepped en lugar de continuo. Se anula al tocar cualquier tecla para que
+     * escribir no requiera mover el teclado antes. */
+    val nudgeBy: (Int) -> Unit = { dp -> dragOffset = (dragOffset.value + dp.dp).coerceIn(-maxDrag, maxDrag) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1080,14 +1212,15 @@ Box(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Text(
-                                "KEY COMBO:",
+                                if (typingMode) "ESCRIBIR:" else "KEY COMBO:",
                                 color = Color(0xFF6C7D93),
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                             )
                             if (selectedKeyIds.isEmpty()) {
                                 Text(
-                                    "Toca teclas para armar combinación...",
+                                    if (typingMode) "Toca para escribir en Blender..."
+                                    else "Toca teclas para armar combinación...",
                                     color = Color(0xFF4A5568),
                                     fontSize = 11.sp,
                                 )
@@ -1127,7 +1260,7 @@ Box(
                                             onDragCancel = { dragOffset = 0.dp },
                                         ) { change, amount ->
                                             change.consume()
-                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(0.dp, maxDrag)
+                                            dragOffset = (dragStart + amount.y.toDp()).coerceIn(-maxDrag, maxDrag)
                                         }
                                     },
                                 contentAlignment = Alignment.Center,
@@ -1150,7 +1283,7 @@ Box(
                              * in the combination until tapped again, so Ctrl+Shift+A can be built
                              * as Ctrl, latch Shift, A in any order. */
                             val latched = latchedModifierIds.isNotEmpty()
-                            Surface(
+                            if (!typingMode) Surface(
                                 shape = RoundedCornerShape(6.dp),
                                 color = if (latched) Amber else CardFace,
                                 border = BorderStroke(1.dp, if (latched) Amber else CardBorder),
@@ -1169,13 +1302,21 @@ Box(
                                     )
                                 }
                             }
+                            /* En modo escritura no hay OK: cada tecla escribe al tocarse y
+                             * lo único que hace falta es cerrar. Las flechas sustituyen al
+                             * handle de arrastre porque mover el teclado es una acción
+                             * repetida, no un gesto continuo. */
+                            if (typingMode) {
+                                MoveArrow(Icons.Default.KeyboardArrowUp, "Subir") { nudgeBy(40) }
+                                MoveArrow(Icons.Default.KeyboardArrowDown, "Bajar") { nudgeBy(-40) }
+                            }
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (selectedKeyIds.isNotEmpty()) Teal else CardFace,
+                                color = if (selectedKeyIds.isNotEmpty() && !typingMode) Teal else CardFace,
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .clickable(enabled = selectedKeyIds.isNotEmpty()) {
+                                        .clickable(enabled = selectedKeyIds.isNotEmpty() && !typingMode) {
                                             // toList(): this is the live keyboard
                                             // selection. Handing over the
                                             // reference made a saved shortcut
@@ -1310,9 +1451,10 @@ private fun ProportionalKeyRow(
 private fun SaveShortcutNameDialog(
     keyCombo: String,
     onDismiss: () -> Unit,
-    onSave: (String) -> Unit,
+    onSave: (String, Boolean) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
+    var toggle by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1363,6 +1505,50 @@ private fun SaveShortcutNameDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
+                /* Toggle: hold the modifiers between firings. Off by default, because a
+                 * stuck Shift would silently change every later operation in the scene. */
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = if (toggle) Amber.copy(alpha = 0.18f) else Color(0xFF1B2028),
+                    border = BorderStroke(1.dp, if (toggle) Amber else PanelBorder),
+                    modifier = Modifier.fillMaxWidth().clickable { toggle = !toggle },
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Toggle (mantener tecla)",
+                                color = if (toggle) Amber else Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                "Toca el atajo para mantener, otra vez para soltar",
+                                color = Color(0xFF6C7D93),
+                                fontSize = 9.sp,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(width = 34.dp, height = 19.dp)
+                                .background(
+                                    if (toggle) Amber else Color(0xFF39424F),
+                                    RoundedCornerShape(10.dp),
+                                ),
+                            contentAlignment = if (toggle) Alignment.CenterEnd else Alignment.CenterStart,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(horizontal = 2.dp)
+                                    .size(15.dp)
+                                    .background(Color.White, RoundedCornerShape(8.dp)),
+                            )
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -1373,7 +1559,7 @@ private fun SaveShortcutNameDialog(
                     }
                     Spacer(modifier = Modifier.width(4.dp))
                     Button(
-                        onClick = { if (name.isNotBlank()) onSave(name) },
+                        onClick = { if (name.isNotBlank()) onSave(name, toggle) },
                         colors = ButtonDefaults.buttonColors(containerColor = Teal),
                         shape = RoundedCornerShape(6.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),

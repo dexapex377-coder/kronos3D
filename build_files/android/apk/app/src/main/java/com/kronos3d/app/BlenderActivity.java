@@ -91,6 +91,27 @@ public class BlenderActivity extends NativeActivity {
   private native void nativeSendKeyCombo(int modifierMask, int keyCode, int metaState);
 
   /**
+   * Insert literal text into whatever Blender field is being edited.
+   *
+   * <p>The on-screen keyboard needs a path that is not the system IME: the Compose
+   * keyboard is shown from a Compose overlay, not from an InputConnection, so
+   * commitText() is never called for it. It forwards to the same handleTextInput()
+   * the IME uses, which lands in the active text field.
+   */
+  public void commitText(String text) {
+    if (text == null || text.isEmpty()) {
+      return;
+    }
+    nativeOnCommitText(text);
+  }
+
+  /** Backspace for the on-screen keyboard, routed like a real KEYCODE_DEL press. */
+  public void sendDeleteKey() {
+    nativeOnKey(KeyEvent.KEYCODE_DEL, KeyEvent.ACTION_DOWN, 0);
+    nativeOnKey(KeyEvent.KEYCODE_DEL, KeyEvent.ACTION_UP, 0);
+  }
+
+  /**
    * Run a shortcut as a real key sequence: every modifier down, key down/up, every
    * modifier up.
    *
