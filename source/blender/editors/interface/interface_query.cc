@@ -145,7 +145,7 @@ bool button_is_popover_once_compat(const Button *but)
 
 bool button_has_array_value(const Button *but)
 {
-  return (but->rnapoin.data && but->rnaprop && RNA_property_array_check(but->rnaprop));
+  return (but->rnapoin && but->rnaprop && RNA_property_array_check(but->rnaprop));
 }
 
 static wmOperatorType *g_ot_tool_set_by_id = nullptr;
@@ -179,17 +179,6 @@ int button_icon(const Button *but)
   /* While icon is loading, show loading icon at the normal icon size. */
   if (icon_is_preview_deferred_loading(but->icon, is_preview)) {
     return ICON_PREVIEW_LOADING;
-  }
-
-  /* Touch: the collapsed top bar button says whether it is open.
-   *
-   * Only the one icon pair, and only on the button that carries it, so nothing else in the
-   * interface changes. It is done here rather than in the layout that builds the button because
-   * Python cannot see the open state, and because the header rebuilds its layout on every redraw
-   * -- so an icon chosen here tracks the state without anything having to invalidate it.
-   * See ANDROID_TOUCH_UI_SCALE_STUDY.md. */
-  if (but->icon == ICON_COLLAPSEMENU && ui_but_menu_is_open(but)) {
-    return ICON_KEY_MENU_FILLED;
   }
 
   /* Consecutive icons can be toggle between. */
@@ -272,7 +261,12 @@ static bool but_isect_pie_seg(const Block *block, const Button *but)
 
 bool button_contains_pt(const Button *but, float mx, float my)
 {
-  return BLI_rctf_isect_pt(&but->rect, mx, my);
+  rctf rect = but->rect;
+  /* Add a magin to allow selecting points at the border of curves maps. */
+  if (ELEM(but->type, ButtonType::Curve, ButtonType::CurveProfile)) {
+    BLI_rctf_pad(&rect, 4, 4);
+  }
+  return BLI_rctf_isect_pt(&rect, mx, my);
 }
 
 bool button_contains_rect(const Button *but, const rctf *rect)
@@ -743,14 +737,19 @@ bool block_can_add_separator(const Block *block)
   return true;
 }
 
-bool block_has_active_default_button(const Block *block)
+const Button *block_active_default_button_find(const Block *block)
 {
   for (const Button &but : block->buttons()) {
     if ((but.flag & BUT_ACTIVE_DEFAULT) && ((but.flag & UI_HIDDEN) == 0)) {
-      return true;
+      return &but;
     }
   }
-  return false;
+  return nullptr;
+}
+
+bool block_has_active_default_button(const Block *block)
+{
+  return block_active_default_button_find(block) != nullptr;
 }
 
 /** \} */

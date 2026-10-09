@@ -37,10 +37,10 @@ VkImageLayout VKImageAccess::to_vk_image_layout(bool supports_local_read) const
       (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT))
   {
     if (vk_image_aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
-      return vk_image_layout_supported(VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+      return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     }
     if (vk_image_aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
-      return vk_image_layout_supported(VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
+      return VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
     }
     BLI_assert(vk_image_aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
     return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;

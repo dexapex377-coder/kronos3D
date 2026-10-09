@@ -13,11 +13,13 @@
 namespace blender::gpu::render_graph {
 VKCommandBufferWrapper::VKCommandBufferWrapper(VkCommandBuffer vk_command_buffer,
                                                const VolkDeviceTable &functions,
-                                               const VKExtensions &extensions)
+                                               const VKExtensions &extensions,
+                                               const VKWorkarounds &workarounds)
     : vk_command_buffer_(vk_command_buffer), functions(&functions)
 {
   use_dynamic_rendering_local_read = extensions.dynamic_rendering_local_read;
-  use_render_pass_fallback = !extensions.dynamic_rendering;
+  use_multi_draw_indirect = extensions.multi_draw_indirect;
+  use_dynamic_state_viewport_scissor = !workarounds.static_viewport_scissor;
 }
 
 void VKCommandBufferWrapper::begin_recording()
@@ -263,11 +265,17 @@ void VKCommandBufferWrapper::push_constants(VkPipelineLayout layout,
 
 void VKCommandBufferWrapper::set_viewport(const Vector<VkViewport> viewports)
 {
+  if (!use_dynamic_state_viewport_scissor) {
+    return;
+  }
   functions->vkCmdSetViewport(vk_command_buffer_, 0, viewports.size(), viewports.data());
 }
 
 void VKCommandBufferWrapper::set_scissor(const Vector<VkRect2D> scissors)
 {
+  if (!use_dynamic_state_viewport_scissor) {
+    return;
+  }
   functions->vkCmdSetScissor(vk_command_buffer_, 0, scissors.size(), scissors.data());
 }
 void VKCommandBufferWrapper::set_line_width(const float line_width)
@@ -310,33 +318,14 @@ void VKCommandBufferWrapper::set_vertex_input(
 
 void VKCommandBufferWrapper::begin_rendering(const VkRenderingInfo *p_rendering_info)
 {
-  BLI_assert(functions->vkCmdBeginRendering);
-  functions->vkCmdBeginRendering(vk_command_buffer_, p_rendering_info);
+  BLI_assert(functions->vkCmdBeginRenderingKHR);
+  functions->vkCmdBeginRenderingKHR(vk_command_buffer_, p_rendering_info);
 }
 
 void VKCommandBufferWrapper::end_rendering()
 {
-  BLI_assert(functions->vkCmdEndRendering);
-  functions->vkCmdEndRendering(vk_command_buffer_);
-}
-
-void VKCommandBufferWrapper::begin_render_pass(VkRenderPass vk_render_pass,
-                                               VkFramebuffer vk_framebuffer,
-                                               const VkRect2D &render_area,
-                                               Span<VkClearValue> clear_values)
-{
-  VkRenderPassBeginInfo begin_info = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-  begin_info.renderPass = vk_render_pass;
-  begin_info.framebuffer = vk_framebuffer;
-  begin_info.renderArea = render_area;
-  begin_info.clearValueCount = uint32_t(clear_values.size());
-  begin_info.pClearValues = clear_values.data();
-  functions->vkCmdBeginRenderPass(vk_command_buffer_, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
-}
-
-void VKCommandBufferWrapper::end_render_pass()
-{
-  functions->vkCmdEndRenderPass(vk_command_buffer_);
+  BLI_assert(functions->vkCmdEndRenderingKHR);
+  functions->vkCmdEndRenderingKHR(vk_command_buffer_);
 }
 
 void VKCommandBufferWrapper::begin_query(VkQueryPool vk_query_pool,

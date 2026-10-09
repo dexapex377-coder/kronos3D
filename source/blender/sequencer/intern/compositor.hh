@@ -8,11 +8,25 @@
 
 #pragma once
 
+#include "BKE_compute_context_cache_fwd.hh"
+
 #include "COM_context.hh"
 #include "COM_node_group_operation.hh"
 #include "SEQ_render.hh"
 
+struct PointerRNA;
+struct bNodeTreeInterfaceSocket;
+enum eNodeSocketDatatype : short;
+
 namespace blender::seq {
+
+/**
+ * Allocate result as a single value, and fill it from the RNA property of the given input.
+ */
+void set_input_result_from_rna(PointerRNA &inputs_ptr,
+                               const bNodeTreeInterfaceSocket &socket,
+                               eNodeSocketDatatype socket_type,
+                               compositor::Result &result);
 
 class CompositorContext : public compositor::Context {
  protected:
@@ -25,9 +39,12 @@ class CompositorContext : public compositor::Context {
 
  public:
   CompositorContext(compositor::StaticCacheManager &cache_manager,
+                    bke::ComputeContextCache &compute_context_cache,
                     const RenderData &render_data,
                     const Strip &strip)
-      : compositor::Context(cache_manager), render_data_(render_data), strip_(&strip)
+      : compositor::Context(cache_manager, compute_context_cache),
+        render_data_(render_data),
+        strip_(&strip)
   {
   }
   const Main &get_main() const override
@@ -54,6 +71,14 @@ class CompositorContext : public compositor::Context {
            this->render_data_.scene->r.compositor_device == SCE_COMPOSITOR_DEVICE_GPU;
   }
 
+  compositor::SideEffectOutputTypes needed_side_effect_output_types() const override
+  {
+    if (!render_data_.render) {
+      return compositor::SideEffectOutputTypes::ViewerNode;
+    }
+    return compositor::SideEffectOutputTypes::None;
+  }
+
   compositor::ResultPrecision get_precision() const override;
 
   float2 get_result_translation() const
@@ -62,14 +87,6 @@ class CompositorContext : public compositor::Context {
   }
 
  protected:
-  compositor::NodeGroupOutputTypes needed_outputs() const
-  {
-    if (!render_data_.render) {
-      return compositor::NodeGroupOutputTypes::ViewerNode;
-    }
-    return compositor::NodeGroupOutputTypes();
-  }
-
   void create_result_from_input(compositor::Result &result, ImBuf &input);
   void write_viewer_impl(const compositor::Result &result, ImBuf &image);
   void write_output(const compositor::Result &result, ImBuf &image);

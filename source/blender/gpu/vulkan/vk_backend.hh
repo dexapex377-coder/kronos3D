@@ -72,6 +72,7 @@ class VKBackend : public GPUBackend {
 
   Batch *batch_alloc() override;
   Fence *fence_alloc() override;
+  WorkInFlight *work_in_flight_alloc(unsigned int max_in_flight) override;
   FrameBuffer *framebuffer_alloc(const char *name) override;
   IndexBuf *indexbuf_alloc() override;
   PixelBuffer *pixelbuf_alloc(size_t size) override;
@@ -89,6 +90,9 @@ class VKBackend : public GPUBackend {
   {
     VKShaderCompiler::cache_dir_clear_old();
   }
+
+  bool pipelines_compiled_since_last_reset() override;
+  void reset_pipeline_compilation_tracking() override;
 
   /* Render Frame Coordination --
    * Used for performing per-frame actions globally */

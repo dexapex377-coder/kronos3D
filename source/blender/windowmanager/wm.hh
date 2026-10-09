@@ -125,31 +125,9 @@ void wm_stereo3d_set_draw(bContext *C, wmOperator *op);
 bool wm_stereo3d_set_check(bContext *C, wmOperator *op);
 void wm_stereo3d_set_cancel(bContext *C, wmOperator *op);
 
-/* `wm_virtual_keyboard.cc` */
-
-void WM_OT_virtual_keyboard_toggle(wmOperatorType *ot);
-/**
- * Answer a GHOST pointer event that belongs to the on-screen keyboard.
- *
- * Called before the event reaches the queue, which is the whole point: a press that gets as far as
- * the interface layer ends any text field being edited, and no handler added later can prevent
- * that. Returns true when the event was consumed, in which case a key event has been queued in its
- * place.
- */
-bool wm_virtual_keyboard_ghost_event(wmWindowManager *wm,
-                                     wmWindow *win,
-                                     int type,
-                                     const void *customdata);
-/** Drop the keyboard when the window it is drawn into goes away. */
-void wm_virtual_keyboard_window_close(wmWindow *win);
-
 /**
  * Initialize operator properties.
  */
 void wm_open_init_load_ui(wmOperator *op, bool use_prefs);
-/**
- * Return true if the script auto-execution should be cleared based on #WM_file_autoexec_init.
- */
-bool wm_open_init_use_scripts(wmOperator *op, bool use_prefs) ATTR_WARN_UNUSED_RESULT;
 
 }  // namespace blender

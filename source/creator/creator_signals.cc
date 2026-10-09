@@ -89,7 +89,7 @@ static void crashlog_file_generate(const char *filepath, const void *os_info)
   /* Might be called after WM/Main exit, so needs to be careful about nullptr-checking before
    * de-referencing. */
 
-  wmWindowManager *wm = G_MAIN ? static_cast<wmWindowManager *>(G_MAIN->wm.first) : nullptr;
+  wmWindowManager *wm = G_MAIN ? G_MAIN->wm.first() : nullptr;
 
   FILE *fp;
   char header[512];
@@ -236,8 +236,6 @@ void main_signal_setup()
   if (app_state.signal.use_crash_handler) {
 #  ifdef WIN32
     SetUnhandledExceptionFilter(windows_exception_handler);
-#  elif defined(__ANDROID__)
-    /* Let debuggerd produce a native backtrace/tombstone on Android. */
 #  else
     /* After parsing arguments. */
     signal(SIGSEGV, sig_handle_crash_fn);

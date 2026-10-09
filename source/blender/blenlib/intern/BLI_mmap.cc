@@ -333,8 +333,7 @@ static bool ensure_mmap_initialized()
 
   std::unique_lock lock(mmap_mutex);
   if (!initialized) {
-    /* Zero-init: bionic's struct sigaction has a different first member. */
-    struct sigaction newact = {}, oldact = {};
+    struct sigaction newact = {{nullptr}}, oldact = {{nullptr}};
 
     newact.sa_sigaction = sigbus_handler;
     newact.sa_flags = SA_SIGINFO;

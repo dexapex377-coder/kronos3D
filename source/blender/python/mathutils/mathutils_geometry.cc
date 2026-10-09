@@ -1598,7 +1598,7 @@ static PyObject *M_Geometry_tessellate_polygon(PyObject * /*self*/, PyObject *po
 
     /* The faces are stored in a new DisplayList
      * that's added to the head of the #ListBase. */
-    dl = static_cast<DispList *>(dispbase.first);
+    dl = dispbase.first();
 
     tri_list = PyList_New(dl->parts);
     if (!tri_list) {
@@ -1957,7 +1957,7 @@ static PyObject *M_Geometry_delaunay_2d_cdt(PyObject * /*self*/, PyObject *args)
   in.face_offsets = face_offsets.as_span();
   in.face_vert_indices = face_vert_indices;
   in.epsilon = epsilon;
-  in.need_ids = need_ids;
+  in.needed_ids = need_ids ? (CDT_ORIG_VERTS | CDT_ORIG_EDGES | CDT_ORIG_FACES) : CDT_NO_ORIG_IDS;
 
   const meshintersect::CDT_result<double> res = meshintersect::delaunay_2d_calc(
       in, CDT_output_type(output_type));

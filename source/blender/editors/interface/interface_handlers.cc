@@ -21,7 +21,6 @@
 #include "DNA_curveprofile_types.h"
 #include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
-#include "DNA_space_types.h"
 
 #include "BLI_array.hh"
 #include "BLI_array_utils_c.hh"
@@ -438,6 +437,7 @@ struct HandleButtonData {
   std::string text_edit_unit_hint;
 
   wmTimer *text_select_auto_scroll = nullptr;
+  double text_select_auto_scroll_last_time = std::numeric_limits<double>::lowest();
 
   double value = 0.0f;
   double origvalue = 0.0f;
@@ -551,17 +551,19 @@ struct AfterFunc {
   PointerRNA rnapoin;
   PropertyRNA *rnaprop;
 
-  void *search_arg;
-  FreeArgFunc search_arg_free_fn;
+  std::shared_ptr<void> search_arg;
 
   BlockInteraction_CallbackData custom_interaction_callbacks;
   BlockInteraction_Handle *custom_interaction_handle;
 
   std::optional<bContextStore> context;
+  /** See #PopupBlockHandle::ctx_region_popup. */
+  ARegion *region_popup;
 
   char undostr[BKE_UNDO_STR_MAX];
   std::string drawstr;
   bool use_undo_grouped = false;
+  UndoEncodeHints undo_hints = UndoEncodeHints::None;
 };
 
 static void button_activate_init(bContext *C,
@@ -758,6 +760,10 @@ static bool rna_is_userdef(PointerRNA *ptr, PropertyRNA *prop)
     return false;
   }
 
+  if (RNA_struct_is_a(ptr->type, RNA_ProjectAssetLibrary)) {
+    return false;
+  }
+
   StructRNA *base = RNA_struct_base(ptr->type);
   if (base == nullptr) {
     base = ptr->type;
@@ -773,7 +779,7 @@ static bool rna_is_userdef(PointerRNA *ptr, PropertyRNA *prop)
     is_userdef = true;
   }
   else if (ptr->owner_id) {
-    switch (GS(ptr->owner_id->name)) {
+    switch (ptr->owner_id->id_type()) {
       case ID_WM: {
         for (const AncestorPointerRNA &ancestor : ptr->ancestors) {
           if (RNA_struct_is_a(ancestor.type, RNA_KeyConfigPreferences)) {
@@ -902,6 +908,9 @@ static void handle_afterfunc_add_operator_ex(wmOperatorType *ot,
   if (context_but && context_but->context) {
     after->context = *context_but->context;
   }
+  if (context_but && context_but->block->handle) {
+    after->region_popup = context_but->block->handle->ctx_region_popup;
+  }
 
   if (context_but) {
     after->drawstr = button_drawstr_without_sep_char(context_but);
@@ -999,10 +1008,7 @@ static void apply_but_func(bContext *C, Button *but)
 
   if (but->type == ButtonType::SearchMenu) {
     ButtonSearch *search_but = static_cast<ButtonSearch *>(but);
-    after->search_arg_free_fn = search_but->arg_free_fn;
     after->search_arg = search_but->arg;
-    search_but->arg_free_fn = nullptr;
-    search_but->arg = nullptr;
   }
 
   if (but->active != nullptr) {
@@ -1029,6 +1035,9 @@ static void apply_but_func(bContext *C, Button *but)
   if (but->context) {
     after->context = *but->context;
   }
+  if (but->block->handle) {
+    after->region_popup = but->block->handle->ctx_region_popup;
+  }
 
   after->drawstr = button_drawstr_without_sep_char(but);
 }
@@ -1048,7 +1057,6 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
 
   std::optional<StringRef> str;
   size_t str_len_clip = SIZE_MAX - 1;
-  bool skip_undo = false;
 
   /* define which string to use for undo */
   if (but->type == ButtonType::Menu) {
@@ -1073,6 +1081,7 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
   }
 
   /* Optionally override undo when undo system doesn't support storing properties. */
+  std::optional<UndoEncodeHints> undo_hints_or_none = UndoEncodeHints::None;
   if (but->rnapoin.owner_id) {
     /* Exception for renaming ID data, we always need undo pushes in this case,
      * because undo systems track data by their ID, see: #67002. */
@@ -1083,25 +1092,22 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
     }
     else if (but->rnaprop) {
       ID *id = but->rnapoin.owner_id;
-      if (!ED_undo_is_legacy_compatible_for_property(
-              static_cast<bContext *>(but->block->evil_C), id, but->rnapoin, *but->rnaprop))
-      {
-        skip_undo = true;
-      }
+      undo_hints_or_none = ED_undo_is_legacy_compatible_for_property(
+          static_cast<bContext *>(but->block->evil_C), id, but->rnapoin, *but->rnaprop);
     }
   }
 
-  if (skip_undo == false) {
+  if (undo_hints_or_none.has_value()) {
     /* XXX: disable all undo pushes from UI changes from sculpt mode as they cause memfile undo
      * steps to be written which cause lag: #71434. */
     if (BKE_paintmode_get_active_from_context(static_cast<bContext *>(but->block->evil_C)) ==
         PaintMode::Sculpt)
     {
-      skip_undo = true;
+      undo_hints_or_none = std::nullopt;
     }
   }
 
-  if (skip_undo) {
+  if (!undo_hints_or_none.has_value()) {
     str = "";
   }
 
@@ -1109,6 +1115,7 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
   AfterFunc *after = afterfunc_new();
   str->copy_utf8_truncated(after->undostr, min_zz(str_len_clip + 1, sizeof(after->undostr)));
   after->use_undo_grouped = use_undo_grouped;
+  after->undo_hints = undo_hints_or_none.value_or(UndoEncodeHints::None);
 }
 
 static void apply_but_autokey(bContext *C, Button *but)
@@ -1151,6 +1158,20 @@ static void apply_but_funcs_after(bContext *C)
       CTX_store_set(C, &after.context.value());
     }
 
+    /* Set the popup this button's popup was opened from (a context menu in a popover)
+     * so operators can access the popup's active button, see: #151170.
+     * That popup may have been closed along with the menu, so check it still exists. */
+    ARegion *region_popup_prev = nullptr;
+    if (after.region_popup) {
+      if (BLI_findindex(&CTX_wm_screen(C)->regionbase, after.region_popup) != -1) {
+        region_popup_prev = CTX_wm_region_popup(C);
+        CTX_wm_region_popup_set(C, after.region_popup);
+      }
+      else {
+        after.region_popup = nullptr;
+      }
+    }
+
     if (after.popup_op) {
       popup_check(C, after.popup_op);
     }
@@ -1175,12 +1196,23 @@ static void apply_but_funcs_after(bContext *C)
       WM_operator_properties_free(&opptr);
     }
 
-    if (after.rnapoin.data) {
+    if (after.rnapoin) {
       RNA_property_update(C, &after.rnapoin, after.rnaprop);
     }
 
     if (after.context) {
       CTX_store_set(C, nullptr);
+    }
+
+    if (after.region_popup) {
+      /* The operator may have freed the popup, for example by loading a file. */
+      bScreen *screen = CTX_wm_screen(C);
+      if (region_popup_prev &&
+          !(screen && BLI_findindex(&screen->regionbase, region_popup_prev) != -1))
+      {
+        region_popup_prev = nullptr;
+      }
+      CTX_wm_region_popup_set(C, region_popup_prev);
     }
 
     if (after.rename_full_func) {
@@ -1212,10 +1244,6 @@ static void apply_but_funcs_after(bContext *C)
       MEM_delete(after.rename_orig);
     }
 
-    if (after.search_arg_free_fn) {
-      after.search_arg_free_fn(after.search_arg);
-    }
-
     if (after.custom_interaction_handle != nullptr) {
       after.custom_interaction_handle->user_count--;
       BLI_assert(after.custom_interaction_handle->user_count >= 0);
@@ -1235,10 +1263,10 @@ static void apply_but_funcs_after(bContext *C)
        * obvious, see #78171. */
       WM_operator_stack_clear(CTX_wm_manager(C));
       if (after.use_undo_grouped) {
-        ED_undo_grouped_push(C, after.undostr);
+        ED_undo_grouped_push(C, after.undostr, after.undo_hints);
       }
       else {
-        ED_undo_push(C, after.undostr);
+        ED_undo_push(C, after.undostr, after.undo_hints);
       }
     }
   }
@@ -1334,7 +1362,7 @@ static void apply_but_TEX(bContext *C, Button *but, HandleButtonData *data)
 
   ButtonText *text_button = but->type == ButtonType::Text ? static_cast<ButtonText *>(but) :
                                                             nullptr;
-  /* only if there are afterfuncs, otherwise 'renam_orig' isn't freed */
+  /* only if there are afterfuncs, otherwise 'rename_orig' isn't freed */
   if (text_button && afterfunc_check(but->block, but)) {
     /* give butfunc a copy of the original text too.
      * feature used for bone renaming, channels, etc.
@@ -1714,25 +1742,25 @@ static bool drag_toggle_but_is_supported(const Button *but)
   return false;
 }
 
-/* Button pushed state to compare if other buttons match. Can be more
- * then just true or false for toggle buttons with more than 2 states. */
-static int drag_toggle_but_pushed_state(Button *but)
+/**
+ * Button pushed state to compare if other buttons match.
+ */
+static bool drag_toggle_but_pushed_state(Button *but)
 {
-  if (but->rnapoin.data == nullptr && but->poin == nullptr && but->icon) {
-    /* Assume icon identifies a unique state, for buttons that
-     * work through functions callbacks and don't have an boolean
-     * value that indicates the state. */
-    return but->icon + but->iconadd;
+  BLI_assert(drag_toggle_but_is_supported(but));
+  if (button_is_decorator(but)) {
+    return button_anim_decorate_pushed_state(static_cast<ButtonDecorator *>(but));
   }
   if (button_is_bool(but)) {
     return button_is_pushed(but);
   }
-  return 0;
+  BLI_assert_unreachable();
+  return false;
 }
 
 struct uiDragToggleHandle {
   /* init */
-  int pushed_state;
+  bool pushed_state;
   float but_cent_start[2];
 
   bool is_xy_lock_init;
@@ -1744,7 +1772,7 @@ struct uiDragToggleHandle {
 
 static bool drag_toggle_set_xy_xy(bContext *C,
                                   ARegion *region,
-                                  const int pushed_state,
+                                  const bool pushed_state,
                                   const int xy_src[2],
                                   const int xy_dst[2],
                                   const bool drag_lock[2])
@@ -1778,7 +1806,7 @@ static bool drag_toggle_set_xy_xy(bContext *C,
         continue;
       }
       /* is it pressed? */
-      const int pushed_state_but = drag_toggle_but_pushed_state(&but);
+      const bool pushed_state_but = drag_toggle_but_pushed_state(&but);
       if (pushed_state_but == pushed_state) {
         continue;
       }
@@ -1940,7 +1968,7 @@ static bool selectcontext_begin(bContext *C, Button *but, uiSelectContextStore *
   }
 
   /* if there is a valid property that is editable... */
-  if (ptr.data && prop) {
+  if (ptr && prop) {
     bool use_path_from_id;
 
     /* some facts we want to know */
@@ -2171,10 +2199,9 @@ static void selectcontext_apply(bContext *C,
 
 static bool but_drag_init(bContext *C, Button *but, HandleButtonData *data, const wmEvent *event)
 {
-  /* A release ends the interaction. Starting a drag here would install a handler whose only
-   * exit condition is the release that has just been consumed, leaving it live forever and
-   * toggling every button the cursor later passes over. */
-  if (event->val == KM_RELEASE) {
+  /* Prevent #TIMER events from initializing drag events which can overlap with #KM_PRESS_DRAG
+   * events, see #161044.  */
+  if (ISTIMER(event->type)) {
     return false;
   }
 
@@ -2947,7 +2974,7 @@ static bool but_copy(bContext *C, Button *but, const bool copy_array)
   /* Left false for copying internal data (color-band for eg). */
   bool is_buf_set = false;
 
-  const bool has_required_data = !(but->poin == nullptr && but->rnapoin.data == nullptr);
+  const bool has_required_data = but->poin || but->rnapoin;
 
   switch (but->type) {
     case ButtonType::Num:
@@ -3048,7 +3075,7 @@ static void but_paste(bContext *C, Button *but, HandleButtonData *data, const bo
   but_get_pasted_text_from_clipboard(
       but_is_utf8(but), &buf_paste, &buf_paste_len, but->type == ButtonType::TextBox);
 
-  const bool has_required_data = !(but->poin == nullptr && but->rnapoin.data == nullptr);
+  const bool has_required_data = but->poin || but->rnapoin;
 
   switch (but->type) {
     case ButtonType::Num:
@@ -3641,7 +3668,7 @@ static void textedit_ime_begin(wmWindow *win, Button *but)
   /* flip y and move down a bit, prevent the IME panel cover the edit button */
   y = win->runtime->eventstate->xy[1] - 12;
 
-  WM_window_IME_begin(win, x, y, 0, 0, true);
+  WM_window_IME_begin(win, x, y, 0, 0, bke::wmIMEOwnerType::Button);
 }
 
 /* Disable IME, and clear #Button IME data. */
@@ -3653,7 +3680,7 @@ static void textedit_ime_end(wmWindow *win, Button *but)
   WM_window_IME_end(win);
 }
 
-void button_ime_reposition(Button *but, int x, int y, bool complete)
+void button_ime_reposition(Button *but, int x, int y)
 {
   if (ELEM(but->type, ButtonType::Num, ButtonType::NumSlider)) {
     return;
@@ -3662,14 +3689,28 @@ void button_ime_reposition(Button *but, int x, int y, bool complete)
   HandleButtonData *data = but->semi_modal_state ? but->semi_modal_state : but->active;
 
   region_to_window(data->region, &x, &y);
-  WM_window_IME_begin(data->window, x, y - 4, 0, 0, complete);
+  y -= 4;
+  wmWindow *win = data->window;
+  if (win->runtime->ime_owner == bke::wmIMEOwnerType::Button) {
+    WM_window_IME_reposition(win, x, y, 0, 0);
+  }
+  else {
+    /* The session ended or a region took it while editing, e.g. because a popup opened.
+     * Begin again for IME to recover, ending first as #textedit_ime_begin does. */
+    WM_window_IME_end(win);
+    WM_window_IME_begin(win, x, y, 0, 0, bke::wmIMEOwnerType::Button);
+  }
 }
 
 const wmIMEData *button_ime_data_get(Button *but)
 {
   HandleButtonData *data = but->semi_modal_state ? but->semi_modal_state : but->active;
 
-  if (data && data->window && data->window->runtime->ime_data_is_composing) {
+  /* The IME state is per-window, so don't use a composition a region owns,
+   * see #wmIMEOwnerType. */
+  if (data && data->window && data->window->runtime->ime_data_is_composing &&
+      (data->window->runtime->ime_owner == bke::wmIMEOwnerType::Button))
+  {
     return data->window->runtime->ime_data;
   }
   return nullptr;
@@ -3701,16 +3742,6 @@ static std::optional<StringRef> button_edit_unit_hint_get_from_prop_subtype(
   return {};
 }
 
-static bool button_edit_unit_hint_expression_is_valid(const char *expression)
-{
-#ifdef WITH_PYTHON
-  return BPY_string_compile_check(expression);
-#else
-  UNUSED_VARS(expression);
-  return true;
-#endif
-}
-
 static void button_edit_unit_hint_refresh(bContext *C, Button *but, HandleButtonData *data)
 {
   /* Unit completion (hint) is only done for buttons with a unit or with a property such as
@@ -3735,7 +3766,7 @@ static void button_edit_unit_hint_refresh(bContext *C, Button *but, HandleButton
     }
 
     /* If the expression we're entering is not valid, don't show the hint. */
-    if (!button_edit_unit_hint_expression_is_valid(data->text_edit.edit_string)) {
+    if (!BPY_string_compile_check(data->text_edit.edit_string)) {
       data->text_edit_unit_hint.clear();
       return;
     }
@@ -3761,7 +3792,7 @@ static void button_edit_unit_hint_refresh(bContext *C, Button *but, HandleButton
     }
 
     /* If the expression we're entering is not valid, don't show the hint. */
-    if (!button_edit_unit_hint_expression_is_valid(data->text_edit.edit_string)) {
+    if (!BPY_string_compile_check(data->text_edit.edit_string)) {
       data->text_edit_unit_hint.clear();
       return;
     }
@@ -3881,9 +3912,6 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
   }
   but->selend = len;
 
-  /* The on-screen keyboard shows what is in the field, since it may well be covering it. */
-  WM_virtual_keyboard_text_edit_begin(win, &text_edit.edit_string);
-
   /* Initialize undo history tracking. */
   text_edit.undo_stack_text = textedit_undo_stack_create();
   textedit_undo_push(text_edit.undo_stack_text, but->editstr, but->pos);
@@ -3927,13 +3955,6 @@ static void textedit_begin(bContext *C, Button *but, HandleButtonData *data)
   /* Temporarily turn off window auto-focus on platforms that support it. */
   GHOST_ISystem *ghost_system = GHOST_ISystem::getSystem();
   ghost_system->setAutoFocus(false);
-
-  /* While Blender's own on-screen keyboard is up it is the keyboard: raising the platform one as
-   * well would cover the field twice and leave two of them typing into it. Closing it hands
-   * typing back, and the next field opened brings the platform keyboard up as before. */
-  if (!WM_virtual_keyboard_is_open(win)) {
-    ghost_system->popupOnScreenKeyboard(static_cast<GHOST_IWindow *>(win->runtime->ghostwin));
-  }
 
 #ifdef WITH_INPUT_IME
   if (!is_num_but) {
@@ -4002,10 +4023,6 @@ static void textedit_end(bContext *C, Button *but, HandleButtonData *data)
   /* Turn back on the auto-focusing of windows. */
   GHOST_ISystem *ghost_system = GHOST_ISystem::getSystem();
   ghost_system->setAutoFocus(true);
-
-  ghost_system->hideOnScreenKeyboard(static_cast<GHOST_IWindow *>(win->runtime->ghostwin));
-
-  WM_virtual_keyboard_text_edit_end(win);
 
   /* Free text undo history text blocks. */
   textedit_undo_stack_destroy(text_edit.undo_stack_text);
@@ -4201,26 +4218,6 @@ static int do_but_textedit(
         }
       }
 
-      /* Touch: a press inside the results arms a drag, and the release ends it -- wherever that
-       * release lands, so a finger that leaves the box on its way up cannot leave the drag armed
-       * behind it.
-       *
-       * Arming on the press is the whole point. The alternative, asking the event which button was
-       * pressed last, answers with the last press there ever was: after any click at all it keeps
-       * saying LEFTMOUSE, so a mouse merely moved across the list, or a stylus merely held above
-       * it, scrolled as though it were being dragged. */
-      bool ended_drag = false;
-      if (data->searchbox) {
-        if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
-          if (inbox) {
-            searchbox_drag_press(data->searchbox);
-          }
-        }
-        else if (event->val == KM_RELEASE) {
-          ended_drag = searchbox_drag_consume_release(data->searchbox);
-        }
-      }
-
       /* for double click: we do a press again for when you first click on button
        * (selects all text, no cursor pos) */
       if (ELEM(event->val, KM_PRESS, KM_DBL_CLICK)) {
@@ -4281,23 +4278,7 @@ static int do_but_textedit(
         /* if we allow activation on key press,
          * it gives problems launching operators #35713. */
         if (event->val == KM_RELEASE) {
-          /* Touch: a release that ends a drag is letting go of the list, not choosing from it.
-           * Without this the finger scrolls to what it wanted and then applies whatever it
-           * happened to stop over, which closes the popup on the wrong answer. */
-          if (!ended_drag) {
-            /* Touch: apply what was pressed rather than what the highlight happened to be on.
-             * A pointer drags the highlight along with it and arrives already on the right row;
-             * a finger and a stylus do not, so without this a tap applies whatever the last arrow
-             * key left selected.
-             *
-             * A release that landed on no result at all -- the slack below the last row, which a
-             * box sized to whole rows can have -- takes nothing rather than the stale highlight.
-             * Choosing something the finger never touched is worse than choosing nothing. */
-            if (data->searchbox && !searchbox_select_at(data->searchbox, event->xy)) {
-              data->cancel = data->escapecancel = true;
-            }
-            button_activate_state(C, but, BUTTON_STATE_EXIT);
-          }
+          button_activate_state(C, but, BUTTON_STATE_EXIT);
           retval = WM_UI_HANDLER_BREAK;
         }
       }
@@ -4340,23 +4321,6 @@ static int do_but_textedit(
         const eStrCursorJumpType jump = textedit_jump_type_from_event(event);
         textedit_move(but, text_edit, direction, event->modifier & KM_SHIFT, jump);
         retval = WM_UI_HANDLER_BREAK;
-        break;
-      }
-      case MOUSEPAN: {
-        if (textbox) {
-          int type = event->type;
-          int value = event->val;
-
-          pan_to_scroll(event, &type, &value);
-          int scroll_dir = 1;
-          if (event->flag & WM_EVENT_SCROLL_INVERT) {
-            scroll_dir = -1;
-          }
-          if (type != MOUSEPAN) {
-            textbox_add_scroll(textbox, (type == WHEELUPMOUSE ? -1 : 1) * scroll_dir);
-          }
-          retval = WM_UI_HANDLER_BREAK;
-        }
         break;
       }
       case WHEELDOWNMOUSE:
@@ -4459,6 +4423,13 @@ static int do_but_textedit(
           changed = autocomplete != AUTOCOMPLETE_NO_MATCH;
 
           if (autocomplete == AUTOCOMPLETE_FULL_MATCH) {
+            if (but->flag & BUT_TEXTEDIT_AUTOCOMPLETE_KEEP_ACTIVE) {
+              /* Exit to apply, then re-activate (as with Tab cycling between text fields),
+               * so this only runs when Tab is pressed, see: #150689. */
+              but->flag |= BUT_ACTIVATE_ON_INIT_NO_SELECT;
+              data->postbut = but;
+              data->posttype = BUTTON_ACTIVATE_TEXT_EDITING;
+            }
             button_activate_state(C, but, BUTTON_STATE_EXIT);
           }
         }
@@ -4617,6 +4588,14 @@ static int do_but_textedit_select(
       if (!textbox || event->customdata != data->text_select_auto_scroll) {
         break;
       }
+
+      const wmTimer *timer = static_cast<const wmTimer *>(event->customdata);
+      if (timer->time_duration == data->text_select_auto_scroll_last_time) {
+        retval = WM_UI_HANDLER_BREAK;
+        break;
+      }
+      data->text_select_auto_scroll_last_time = timer->time_duration;
+
       rctf rect;
       block_to_window_rctf(data->region, block, &rect, &but->rect);
 
@@ -5074,7 +5053,7 @@ static ButtonExtraOpIcon *but_extra_operator_icon_mouse_over_get(Button *but,
 
   /* Handle the padding space from the right edge as the last button. */
   if (x > xmax) {
-    return static_cast<ButtonExtraOpIcon *>(but->extra_op_icons.last);
+    return but->extra_op_icons.last();
   }
 
   /* Inverse order, from right to left. */
@@ -5148,93 +5127,11 @@ static void do_but_extra_operator_icons_mousemove(Button *but,
 
 #ifdef USE_DRAG_TOGGLE
 /* Shared by any button that supports drag-toggle. */
-#ifdef __ANDROID__
-/**
- * True in the regions where a press-and-drag should scroll rather than act on whatever
- * widget is under the finger.
- *
- * On a touch screen there is no second finger to spare: a two-finger drag is already pan
- * and zoom, and on a phone it is awkward besides. A panel, a header or the Properties
- * editor is made almost entirely of widgets, so there is nowhere to put a finger that is
- * not a button, and these regions could not be scrolled with one finger at all.
- *
- * Binding view2d.pan to a left click-drag does not achieve this on its own, because most
- * widgets act on #KM_PRESS and are finished before a drag can be recognised. The callers
- * of this function defer to #KM_CLICK instead, which the window manager synthesises on
- * release only when the drag threshold was never crossed. A tap therefore still activates
- * the widget, while a drag falls through to the region keymap and pans.
- *
- * Deliberately false for the main region of the 3D view, the node editor, the outliner and
- * the other data editors, where press-and-drag already means box select or a stroke and
- * must keep meaning that. False inside menus too: those scroll on their own path through
- * #ui_handle_menu_event.
- */
-static bool but_touch_scroll_region(const Button *but, const HandleButtonData *data)
-{
-  if (but->block && block_is_menu(but->block)) {
-    return false;
-  }
-  const ARegion *region = data->region;
-  if (region == nullptr) {
-    return false;
-  }
-  switch (region->regiontype) {
-    /* Everything that frames an editor rather than being one: headers, side panels,
-     * tool bars, channel lists, the Properties tab column. */
-    case RGN_TYPE_HEADER:
-    case RGN_TYPE_TOOL_HEADER:
-    case RGN_TYPE_FOOTER:
-    case RGN_TYPE_UI:
-    case RGN_TYPE_TOOLS:
-    case RGN_TYPE_TOOL_PROPS:
-    case RGN_TYPE_NAV_BAR:
-    case RGN_TYPE_EXECUTE:
-    case RGN_TYPE_CHANNELS:
-    case RGN_TYPE_ASSET_SHELF:
-    case RGN_TYPE_ASSET_SHELF_HEADER:
-      return true;
-    /* Main regions, but only for the editors that are themselves a list of widgets. */
-    case RGN_TYPE_WINDOW: {
-      const ScrArea *area = data->area;
-      return area != nullptr && ELEM(area->spacetype,
-                                     SPACE_PROPERTIES,
-                                     SPACE_USERPREF,
-                                     SPACE_FILE,
-                                     SPACE_INFO,
-                                     SPACE_TOPBAR,
-                                     SPACE_STATUSBAR);
-    }
-    default:
-      return false;
-  }
-}
-
-/**
- * Set when a motion event over a held button should reach the region keymap rather than be
- * swallowed, so a drag that starts on a widget scrolls the region.
- *
- * handler_region_menu() blocks every event while a button is in a modal state, discarding
- * whatever handle_button_event() returned -- and blocking a motion is exactly what makes the
- * window manager drop its pending click-drag, so the drag could never form. This is how that
- * one case asks to be let through. Set by the WAIT_RELEASE motion handling, read by
- * handler_region_menu(), which runs immediately after it on the same event.
- */
-static bool touch_scroll_pass_motion = false;
-
-#  define BUT_TOUCH_SCROLL(but, data) but_touch_scroll_region(but, data)
-#  define TOUCH_SCROLL_PASS_MOTION() (touch_scroll_pass_motion = true)
-#else
-#  define BUT_TOUCH_SCROLL(but, data) false
-#  define TOUCH_SCROLL_PASS_MOTION() ((void)0)
-#endif
-
 static bool do_but_ANY_drag_toggle(
     bContext *C, Button *but, HandleButtonData *data, const wmEvent *event, int *r_retval)
 {
   if (data->state == BUTTON_STATE_HIGHLIGHT) {
-    if (event->type == LEFTMOUSE && event->val == KM_PRESS && but_is_drag_toggle(but) &&
-        !BUT_TOUCH_SCROLL(but, data))
-    {
+    if (event->type == LEFTMOUSE && event->val == KM_PRESS && but_is_drag_toggle(but)) {
       apply_but(C, but->block, but, data, true);
       button_activate_state(C, but, BUTTON_STATE_WAIT_DRAG);
       data->dragstartx = event->xy[0];
@@ -5264,8 +5161,10 @@ static int do_but_BUT(bContext *C, Button *but, HandleButtonData *data, const wm
     }
   }
 #endif
-  if (button_draw_as_link(but) && !data->changed_cursor) {
-    WM_cursor_set(data->window, WM_CURSOR_HAND_POINT);
+  if (button_draw_as_link(but)) {
+    if (data->window->cursor != WM_CURSOR_HAND_POINT) {
+      WM_cursor_modal_set(data->window, WM_CURSOR_HAND_POINT);
+    }
     data->changed_cursor = true;
   }
   if (button_opens_link(but) && !data->changed_wokspace_status) {
@@ -5276,13 +5175,7 @@ static int do_but_BUT(bContext *C, Button *but, HandleButtonData *data, const wm
   if (data->state == BUTTON_STATE_HIGHLIGHT) {
     if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
       button_activate_state(C, but, BUTTON_STATE_WAIT_RELEASE);
-      /* Touch: leaving the press unconsumed is what lets the window manager still turn it
-       * into a click-drag once the finger moves, so a drag that starts on a button scrolls
-       * the region -- the tool bar is a column of these and could not be scrolled at all.
-       * WAIT_RELEASE is still entered, so a tap applies the button on release exactly as
-       * before and the hold action, the tool-group popup, still arms. The motion itself is
-       * what cancels the button; see the WAIT_RELEASE case in handle_button_event. */
-      return BUT_TOUCH_SCROLL(but, data) ? WM_UI_HANDLER_CONTINUE : WM_UI_HANDLER_BREAK;
+      return WM_UI_HANDLER_BREAK;
     }
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE && but->block->handle) {
       /* regular buttons will be 'UI_SELECT', menu items 'UI_HOVER' */
@@ -5433,8 +5326,7 @@ static int do_but_TAB(
       return WM_UI_HANDLER_BREAK;
     }
     if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY)) {
-      const int event_val = (is_property && !BUT_TOUCH_SCROLL(but, data)) ? KM_PRESS :
-                                                                           KM_CLICK;
+      const int event_val = (is_property) ? KM_PRESS : KM_CLICK;
       if (event->val == event_val) {
         button_activate_state(C, but, BUTTON_STATE_EXIT);
         return WM_UI_HANDLER_BREAK;
@@ -5560,16 +5452,8 @@ static int do_but_TEX(
       return WM_UI_HANDLER_BREAK;
     }
     else if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE) && (event->modifier & KM_CTRL)) {
-      if (but->type == ButtonType::SearchMenu) {
-        /* Disable value cycling for search buttons. This causes issues because the search data is
-         * moved to the `afterfuncs`, but search updating requires it again or sometimes this
-         * event can be triggered twice in row without the button being refreshed. See #147539 and
-         * #152976. */
-      }
-      else {
-        const int inc_value = (event->type == WHEELUPMOUSE) ? 1 : -1;
-        return do_but_text_value_cycle(C, but, data, inc_value);
-      }
+      const int inc_value = (event->type == WHEELUPMOUSE) ? 1 : -1;
+      return do_but_text_value_cycle(C, but, data, inc_value);
     }
   }
   else if (data->state == BUTTON_STATE_TEXT_EDITING) {
@@ -5594,6 +5478,21 @@ static int do_but_TEXTBOX(bContext *C,
   switch (data->state) {
     case BUTTON_STATE_TEXT_EDITING:
     case BUTTON_STATE_HIGHLIGHT: {
+      if (event->type == MOUSEPAN && textbox->last_total_lines > textbox->visible_lines()) {
+        int type = event->type;
+        int value = event->val;
+
+        pan_to_scroll(event, &type, &value);
+        int scroll_dir = 1;
+        if (event->flag & WM_EVENT_SCROLL_INVERT) {
+          scroll_dir = -1;
+        }
+        if (type != MOUSEPAN) {
+          textbox_add_scroll(textbox, (type == WHEELUPMOUSE ? -1 : 1) * scroll_dir);
+          ED_region_tag_redraw(data->region);
+        }
+        return WM_UI_HANDLER_BREAK;
+      }
       if (ELEM(event->type, WHEELUPMOUSE, WHEELDOWNMOUSE)) {
         if (textbox->last_total_lines > textbox->visible_lines()) {
           textbox_add_scroll(textbox, (event->type == WHEELUPMOUSE ? -1 : 1));
@@ -5769,9 +5668,7 @@ static int do_but_TOG(bContext *C, Button *but, HandleButtonData *data, const wm
       }
       else if (!do_but_extra_operator_icon(C, but, data, event)) {
         /* Also use double-clicks to prevent fast clicks to leak to other handlers (#76481). */
-        do_activate = BUT_TOUCH_SCROLL(but, data) ?
-                          ELEM(event->val, KM_CLICK, KM_DBL_CLICK) :
-                          ELEM(event->val, KM_PRESS, KM_DBL_CLICK);
+        do_activate = ELEM(event->val, KM_PRESS, KM_DBL_CLICK);
       }
     }
 
@@ -6439,7 +6336,7 @@ static int do_but_NUM(
       click = 1;
     }
     else if (event->val == KM_PRESS) {
-      if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY) && (event->modifier & KM_CTRL)) {
+      if (ELEM(event->type, EVT_PADENTER, EVT_RETKEY) && (event->modifier & KM_CTRL)) {
         button_activate_state(C, but, BUTTON_STATE_TEXT_EDITING);
         retval = WM_UI_HANDLER_BREAK;
       }
@@ -6550,7 +6447,8 @@ static int do_but_NUM(
       if (but->drawflag & (BUT_HOVER_LEFT | BUT_HOVER_RIGHT)) {
         button_activate_state(C, but, BUTTON_STATE_NUM_EDITING);
 
-        const int value_step = int(number_but->step_size);
+        const int step = number_but->step_size * (event->modifier & KM_SHIFT ? 0.1 : 1);
+        const int value_step = std::max(1, step);
         BLI_assert(value_step > 0);
         const int softmin = round_fl_to_int_clamp(but->softmin);
         const int softmax = round_fl_to_int_clamp(but->softmax);
@@ -6589,13 +6487,20 @@ static int do_but_NUM(
         else {
           value_step = double(number_but->step_size * UI_PRECISION_FLOAT_SCALE);
         }
+
+        const eSnapType snap = ISMOUSE_BUTTON(event->type) ? event_to_snap(event) : SNAP_OFF;
+        value_step = (snap == SNAP_OFF) ? value_step : number_but->step_size;
+        if (event->modifier & KM_SHIFT) {
+          value_step *= 0.1;
+        }
+
         BLI_assert(value_step > 0.0f);
         const double value_test =
             (but->drawflag & BUT_HOVER_LEFT) ?
                 double(max_ff(but->softmin, float(data->value - value_step))) :
                 double(min_ff(but->softmax, float(data->value + value_step)));
         if (value_test != data->value) {
-          data->value = value_test;
+          data->value = numedit_apply_snapf(but, value_test, but->softmin, but->softmax, snap);
         }
         else {
           data->cancel = true;
@@ -7162,9 +7067,7 @@ static int do_but_BLOCK(bContext *C, Button *but, HandleButtonData *data, const 
     }
 #endif
     /* regular open menu */
-    if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY) &&
-        event->val == (BUT_TOUCH_SCROLL(but, data) ? KM_CLICK : KM_PRESS))
-    {
+    if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY) && event->val == KM_PRESS) {
       button_activate_state(C, but, BUTTON_STATE_MENU_OPEN);
       return WM_UI_HANDLER_BREAK;
     }
@@ -7319,7 +7222,7 @@ static bool numedit_but_UNITVEC(
 
 static void palette_set_active(ButtonColor *color_but)
 {
-  if (color_but->is_pallete_color) {
+  if (color_but->is_palette_color) {
     Palette *palette = id_cast<Palette *>(color_but->rnapoin.owner_id);
     const PaletteColor *color = static_cast<const PaletteColor *>(color_but->rnapoin.data);
     palette->active_color = BLI_findindex(&palette->colors, color);
@@ -7352,9 +7255,7 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
     }
 #endif
     /* regular open menu */
-    if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY) &&
-        event->val == (BUT_TOUCH_SCROLL(but, data) ? KM_CLICK : KM_PRESS))
-    {
+    if (ELEM(event->type, LEFTMOUSE, EVT_PADENTER, EVT_RETKEY) && event->val == KM_PRESS) {
       palette_set_active(color_but);
       button_activate_state(C, but, BUTTON_STATE_MENU_OPEN);
       return WM_UI_HANDLER_BREAK;
@@ -7386,7 +7287,7 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
       apply_but(C, but->block, but, data, true);
       return WM_UI_HANDLER_BREAK;
     }
-    if (color_but->is_pallete_color && (event->type == EVT_DELKEY) && (event->val == KM_PRESS)) {
+    if (color_but->is_palette_color && (event->type == EVT_DELKEY) && (event->val == KM_PRESS)) {
       Palette *palette = id_cast<Palette *>(but->rnapoin.owner_id);
       PaletteColor *color = static_cast<PaletteColor *>(but->rnapoin.data);
 
@@ -7396,7 +7297,7 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
 
       /* this is risky. it works OK for now,
        * but if it gives trouble we should delay execution */
-      but->rnapoin = PointerRNA_NULL;
+      but->rnapoin = {};
       but->rnaprop = nullptr;
 
       return WM_UI_HANDLER_BREAK;
@@ -7417,7 +7318,7 @@ static int do_but_COLOR(bContext *C, Button *but, HandleButtonData *data, const 
     }
 
     if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
-      if (color_but->is_pallete_color) {
+      if (color_but->is_palette_color) {
         if ((event->modifier & KM_CTRL) == 0) {
           float color[3];
           Paint *paint = BKE_paint_get_active_from_context(C);
@@ -8400,9 +8301,7 @@ static int do_but_CURVE(
     bContext *C, Block *block, Button *but, HandleButtonData *data, const wmEvent *event)
 {
   bool changed = false;
-  const Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
-  ViewLayer *view_layer = CTX_data_view_layer(C);
 
   int mx = event->xy[0];
   int my = event->xy[1];
@@ -8552,7 +8451,7 @@ static int do_but_CURVE(
         }
         else {
           BKE_curvemapping_changed(cumap, true); /* remove doubles */
-          BKE_paint_invalidate_cursor_overlay(*bmain, scene, view_layer, cumap);
+          bke::paint::invalidate_cursor_overlay(*scene, cumap);
         }
       }
 
@@ -9198,34 +9097,6 @@ static int do_button(bContext *C, Block *block, Button *but, const wmEvent *even
     /* handle menu */
 
     if ((event->type == RIGHTMOUSE) && (event->modifier == 0) && (event->val == KM_PRESS)) {
-#ifdef __ANDROID__
-      /* Touch: a finger held on a button that has a hold action gets the hold, not the context
-       * menu.
-       *
-       * A tool with variants -- Select Box holding Circle and Lasso, and every other tool with the
-       * small corner mark -- opens them by pressing and holding, through but->hold_func. A finger
-       * cannot get there: GHOST withholds its press until it has moved past the slop, and a press
-       * held still is turned into a right-click at TOUCH_LONG_PRESS_MS before any left press is
-       * sent (see GHOST_SystemAndroid::touchLongPressCheck). So holding a tool opened "Add to
-       * Quick Favorites" instead of the variants, and the variants had no route at all from a
-       * finger. The comment on the hold timer in button_activate_state() says as much.
-       *
-       * Only for a pointer with no tablet data, which is the finger and, on a phone, a mouse. A
-       * stylus is left alone: its tip already sends a left press, so holding it reaches the hold
-       * timer the ordinary way, and its side button is a real right-click that should stay one.
-       *
-       * The cost, stated plainly: on a button that has a hold action, a finger can no longer reach
-       * the context menu -- the same press cannot mean two things. A stylus still can, with its
-       * side button, and every button without a hold action is untouched. Worth it because the
-       * variants are otherwise unreachable, while the context menu is not. */
-      if (but->hold_func != nullptr && event->tablet.active == EVT_TABLET_NONE) {
-        data->cancel = true;
-        button_activate_state(C, but, BUTTON_STATE_EXIT);
-        but->hold_func(C, data->region, but);
-        return WM_UI_HANDLER_BREAK;
-      }
-#endif
-
       /* For some button types that are typically representing entire sets of data,
        * right-clicking to spawn the context menu should also activate the item. This makes it
        * clear which item will be operated on. Apply the button immediately, so context menu
@@ -9521,7 +9392,7 @@ static ARegion *but_tooltip_init(
   if (*pass == 1) {
     is_quick_tip = true;
     (*pass)--;
-    (*r_pass_delay) = UI_TOOLTIP_DELAY - UI_TOOLTIP_DELAY_QUICK;
+    (*r_pass_delay) = UI_TOOLTIP_DELAY + UI_TOOLTIP_DELAY_QUICK;
   }
 
   Button *but = region_active_but_get(region);
@@ -9545,7 +9416,7 @@ static void button_tooltip_timer_reset(bContext *C, Button *but)
 
   if ((U.flag & USER_TOOLTIPS) || (data->tooltip_force)) {
     if (!but->block->tooltipdisabled) {
-      if (!wm->runtime->drags.first) {
+      if (!wm->runtime->drags.first_) {
         const bool is_quick_tip = but_has_quick_tooltip(but);
         const double delay = is_quick_tip ? UI_TOOLTIP_DELAY_QUICK : UI_TOOLTIP_DELAY;
         WM_tooltip_timer_init_ex(
@@ -9566,11 +9437,6 @@ static void button_tooltip_timer_reset(bContext *C, Button *but)
 /* -------------------------------------------------------------------- */
 /** \name Button State Handling
  * \{ */
-
-bool ui_but_menu_is_open(const Button *but)
-{
-  return but->active && but->active->state == BUTTON_STATE_MENU_OPEN;
-}
 
 static bool button_modal_state(HandleButtonState state)
 {
@@ -9751,17 +9617,8 @@ static void button_activate_state(bContext *C, Button *but, HandleButtonState st
 
   /* add hold timer if it's used */
   if (state == BUTTON_STATE_WAIT_RELEASE && (but->hold_func != nullptr)) {
-    /* Touch: 0.2s is shorter than the pause at the start of a deliberate drag, so where a
-     * drag scrolls the region the tool-group popup opened before the scroll could begin --
-     * a grouped tool behaved like a plain tap. Wait long enough that only a pointer meaning
-     * to stay put gets there; motion cancels the timer outright (see handle_button_event).
-     *
-     * This only ever applies to a stylus. A finger never reaches here at all: its press is
-     * withheld until it has travelled past the slop, and holding it still turns into a
-     * right-click in GHOST before any left press is sent. */
-    const double hold_delay = BUT_TOUCH_SCROLL(but, data) ? BUTTON_AUTO_OPEN_THRESH * 3.0 :
-                                                            BUTTON_AUTO_OPEN_THRESH;
-    data->hold_action_timer = WM_event_timer_add(data->wm, data->window, TIMER, hold_delay);
+    data->hold_action_timer = WM_event_timer_add(
+        data->wm, data->window, TIMER, BUTTON_AUTO_OPEN_THRESH);
   }
   else if (data->hold_action_timer) {
     WM_event_timer_remove(data->wm, data->window, data->hold_action_timer);
@@ -9893,7 +9750,7 @@ static void button_activate_init(bContext *C,
     /* activate first button in submenu */
     if (data->menu && data->menu->region) {
       ARegion *subar = data->menu->region;
-      Block *subblock = static_cast<Block *>(subar->runtime->uiblocks.first);
+      Block *subblock = subar->runtime->uiblocks.first();
       Button *subbut;
 
       if (subblock) {
@@ -10034,7 +9891,7 @@ static void button_activate_exit(
 #endif
 
   if (data->changed_cursor) {
-    if (but->type == ButtonType::TextBox) {
+    if (but->type == ButtonType::TextBox || button_draw_as_link(but)) {
       WM_cursor_modal_restore(win);
     }
     WM_cursor_set(win, WM_CURSOR_DEFAULT);
@@ -10198,7 +10055,7 @@ Button *region_active_but_prop_get(const ARegion *region,
 {
   Button *activebut = region_active_but_get(region);
 
-  if (activebut && activebut->rnapoin.data) {
+  if (activebut && activebut->rnapoin) {
     *r_ptr = activebut->rnapoin;
     *r_prop = activebut->rnaprop;
     *r_index = activebut->rnaindex;
@@ -10300,7 +10157,8 @@ ARegion *region_searchbox_region_get(const ARegion *button_region)
 void context_update_anim_flag(const bContext *C)
 {
   Scene *scene = CTX_data_scene(C);
-  ARegion *region = CTX_wm_region(C);
+  ARegion *region_popup = CTX_wm_region_popup(C);
+  ARegion *region = region_popup ? region_popup : CTX_wm_region(C);
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
   const AnimationEvalContext anim_eval_context = BKE_animsys_eval_context_construct(
       depsgraph, (scene) ? BKE_scene_frame_get(scene) : 0.0f);
@@ -10759,31 +10617,10 @@ static int handle_button_event(bContext *C, const wmEvent *event, Button *but)
         break;
       }
       case MOUSEMOVE: {
-        /* Touch: past the drag threshold this is a scroll rather than a press. Cancel the
-         * button -- what releasing away from it would have done anyway -- and let the motion
-         * through, so the click-drag survives for the region keymap to turn into a pan.
-         * Anything that drags on purpose has left WAIT_RELEASE by now: a slider is in
-         * NUM_EDITING and a text field in TEXT_EDITING. */
-        if (BUT_TOUCH_SCROLL(but, data) && WM_event_drag_test(event, event->prev_press_xy)) {
-          data->cancel = true;
-          button_activate_state(C, but, BUTTON_STATE_EXIT);
-          TOUCH_SCROLL_PASS_MOTION();
-          return WM_UI_HANDLER_CONTINUE;
-        }
         /* deselect the button when moving the mouse away */
         /* also de-activate for buttons that only show highlights */
         if (button_contains_point_px(but, region, event->xy)) {
 
-          /* Touch: movement means this is a scroll, so the tool-group popup must not fire
-           * behind it. A third of the drag threshold is slack enough for a resting stylus
-           * while still killing the timer well before the drag itself is recognised. */
-          if (data->hold_action_timer && BUT_TOUCH_SCROLL(but, data) &&
-              len_manhattan_v2v2_int(event->xy, event->prev_press_xy) >
-                  (WM_event_drag_threshold(event) / 3))
-          {
-            WM_event_timer_remove(data->wm, data->window, data->hold_action_timer);
-            data->hold_action_timer = nullptr;
-          }
           /* Drag on a hold button (used in the toolbar) now opens it immediately. */
           if (data->hold_action_timer) {
             if (but->flag & UI_SELECT) {
@@ -10811,16 +10648,6 @@ static int handle_button_event(bContext *C, const wmEvent *event, Button *but)
             data->cancel = true;
             ED_region_tag_redraw_no_rebuild(data->region);
           }
-        }
-        /* Touch: still below the threshold, but the motion must not be consumed either. The
-         * window manager drops the pending click-drag as soon as any handler takes a motion
-         * event, so consuming these would kill the drag before it could ever reach the
-         * threshold. That is invisible with a finger, whose press is only reported once it
-         * has already travelled past the slop, and fatal with a stylus, which presses on
-         * contact and then moves a few pixels at a time. */
-        if (BUT_TOUCH_SCROLL(but, data)) {
-          TOUCH_SCROLL_PASS_MOTION();
-          return WM_UI_HANDLER_CONTINUE;
         }
         break;
       }
@@ -11280,7 +11107,7 @@ static void handle_button_return_submenu(bContext *C, const wmEvent *event, Butt
 
 static void mouse_motion_towards_init_ex(PopupBlockHandle *menu, const int xy[2], const bool force)
 {
-  BLI_assert(((Block *)menu->region->runtime->uiblocks.first)->flag &
+  BLI_assert(((Block *)menu->region->runtime->uiblocks.first_)->flag &
              (BLOCK_MOVEMOUSE_QUIT | BLOCK_POPOVER));
 
   if (!menu->dotowards || force) {
@@ -11321,7 +11148,7 @@ static bool mouse_motion_towards_check(Block *block,
     /* Test if this is the last menu. */
     ARegion *region = menu->region->next;
     do {
-      Block *block_iter = static_cast<Block *>(region->runtime->uiblocks.first);
+      Block *block_iter = region->runtime->uiblocks.first();
       if (block_iter && block_is_menu(block_iter)) {
         return true;
       }
@@ -11684,7 +11511,7 @@ static int handle_menu_mmb_event(bContext *C,
                                  const bool is_parent_menu)
 {
   ARegion *region = menu->region;
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  Block *block = region->runtime->uiblocks.first();
   wmWindow *win = CTX_wm_window(C);
   Button *but = region_find_active_but(region);
   int mx = event->xy[0];
@@ -11772,130 +11599,6 @@ static int handle_menu_mmb_event(bContext *C,
   return retval;
 }
 
-#ifdef __ANDROID__
-/**
- * Touch: scroll a popup that does not fit, with a finger.
- *
- * A mouse has two ways into an over-long menu and a finger has neither. It can rest in the arrow
- * band at the top or bottom, which starts #PopupBlockHandle::scrolltimer and auto-scrolls; a
- * finger cannot hover at all, only touch. Or it can hold the middle button and pan, which a
- * finger has no equivalent of. So the menu was reachable only as far as it happened to fit, and
- * the arrows looked like controls while being nothing of the kind.
- *
- * This adds the two gestures a phone expects, and nothing else:
- *
- * - Drag anywhere in the popup to pan it, the way the rest of this port already pans headers and
- *   panels. The press is not consumed, so a tap still presses the item under it; only once the
- *   drag threshold is crossed does it become a scroll, and then the release is swallowed so the
- *   item the finger drifted onto is not fired.
- * - Tap the arrow band to step. Nothing else is under it: #but_find_mouse_over_ex refuses to
- *   return a button there while the block is clipped, which is what made the arrows feel dead.
- *
- * Both are inert unless the block is actually clipped, so a popup that fits behaves exactly as
- * it did. This covers dialogs as much as menus: every popup in the program is laid out and
- * handled through this path, and the scroll offset lives on the handle rather than on anything
- * menu-specific.
- */
-static int handle_menu_touch_scroll_event(bContext *C,
-                                          const wmEvent *event,
-                                          PopupBlockHandle *menu,
-                                          const bool inside)
-{
-  ARegion *region = menu->region;
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
-  if (block == nullptr) {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-
-  /* Only a popup that overflows has anywhere to scroll to. */
-  const bool scrollable = (block->flag & (BLOCK_CLIPTOP | BLOCK_CLIPBOTTOM)) != 0;
-
-  if (event->type == LEFTMOUSE && event->val == KM_PRESS) {
-    menu->touch_scroll_armed = false;
-    menu->touch_scroll_panning = false;
-    menu->touch_scroll_arrow = 0;
-
-    if (!inside || !scrollable || menu->mmb_panning || menu->is_grab) {
-      return WM_UI_HANDLER_CONTINUE;
-    }
-    /* A button already editing text or dragging a value owns the gesture. */
-    if (Button *but = region_find_active_but(region)) {
-      if (button_modal_state(but->active->state)) {
-        return WM_UI_HANDLER_CONTINUE;
-      }
-    }
-
-    int mx = event->xy[0];
-    int my = event->xy[1];
-    window_to_block(region, block, &mx, &my);
-
-    menu->touch_scroll_armed = true;
-    menu->touch_scroll_start_y = event->xy[1];
-    menu->touch_scroll_last_y = event->xy[1];
-    menu->touch_scroll_arrow = menu_scroll_test(block, {mx, my});
-
-    /* Deliberately not consumed: a tap has to reach the item the way it always did. */
-    return WM_UI_HANDLER_CONTINUE;
-  }
-
-  if (!menu->touch_scroll_armed) {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-
-  if (event->type == MOUSEMOVE) {
-    if (!menu->touch_scroll_panning) {
-      if (abs(event->xy[1] - menu->touch_scroll_start_y) < WM_event_drag_threshold(event)) {
-        return WM_UI_HANDLER_CONTINUE;
-      }
-      /* Past the threshold this is a scroll and not a press. Let go of whatever the finger
-       * landed on, so it neither fires nor stays highlighted under a moving finger. */
-      menu->touch_scroll_panning = true;
-      if (Button *but = region_find_active_but(region)) {
-        but->active->cancel = true;
-        button_activate_exit(C, but, but->active, false, false);
-      }
-    }
-
-    const int delta = event->xy[1] - menu->touch_scroll_last_y;
-    if (delta != 0) {
-      /* The content follows the finger, which is the gesture every other list on the device
-       * uses. Same sign as the middle mouse pan above. */
-      menu_scroll_apply_offset_y(region, block, delta);
-      menu->touch_scroll_last_y = event->xy[1];
-    }
-    return WM_UI_HANDLER_BREAK;
-  }
-
-  if (event->type == LEFTMOUSE && event->val == KM_RELEASE) {
-    const bool panned = menu->touch_scroll_panning;
-    const char arrow = menu->touch_scroll_arrow;
-
-    menu->touch_scroll_armed = false;
-    menu->touch_scroll_panning = false;
-    menu->touch_scroll_arrow = 0;
-
-    if (panned) {
-      /* The item under the finger now is not the one the gesture started on. */
-      return WM_UI_HANDLER_BREAK;
-    }
-    if (arrow != 0 && scrollable) {
-      /* A tap on the band steps by more than the auto-scroll does per tick: one row per tap
-       * would take a dozen taps to cross a menu the length of File. */
-      const float dy = (UI_UNIT_Y * 3.0f) / block->aspect;
-      if (arrow == 't' && (block->flag & BLOCK_CLIPTOP)) {
-        menu_scroll_apply_offset_y(region, block, -dy);
-      }
-      else if (arrow == 'b' && (block->flag & BLOCK_CLIPBOTTOM)) {
-        menu_scroll_apply_offset_y(region, block, dy);
-      }
-      return WM_UI_HANDLER_BREAK;
-    }
-  }
-
-  return WM_UI_HANDLER_CONTINUE;
-}
-#endif /* __ANDROID__ */
-
 static int handle_menu_event(bContext *C,
                              const wmEvent *event,
                              PopupBlockHandle *menu,
@@ -11904,19 +11607,11 @@ static int handle_menu_event(bContext *C,
                              const bool is_parent_menu,
                              const bool is_floating)
 {
-  int retval = WM_UI_HANDLER_CONTINUE;
   Button *but;
   ARegion *region = menu->region;
+  Block *block = region->runtime->uiblocks.first();
 
-#ifdef __ANDROID__
-  if (menu == nullptr || region == nullptr || region->runtime == nullptr ||
-      region->runtime->uiblocks.is_empty())
-  {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-#endif
-
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  int retval = WM_UI_HANDLER_CONTINUE;
 
   int mx = event->xy[0];
   int my = event->xy[1];
@@ -11980,11 +11675,6 @@ static int handle_menu_event(bContext *C,
     }
   }
 #endif
-#ifdef __ANDROID__
-  if (retval == WM_UI_HANDLER_CONTINUE) {
-    retval = handle_menu_touch_scroll_event(C, event, menu, inside);
-  }
-#endif
   if (retval == WM_UI_HANDLER_CONTINUE) {
     retval = handle_menu_mmb_event(C, event, menu, level, is_parent_menu);
   }
@@ -12041,7 +11731,7 @@ static int handle_menu_event(bContext *C,
         case RIGHTMOUSE:
           if (inside == false) {
             if (event->val == KM_PRESS && (block->flag & BLOCK_LOOP)) {
-              if (block->saferct.first) {
+              if (block->saferct.first()) {
                 /* Currently right clicking on a top level pull-down (typically in the header)
                  * just closes the menu and doesn't support immediately handling the RMB event.
                  *
@@ -12059,7 +11749,7 @@ static int handle_menu_event(bContext *C,
         /* Closing sub-levels of pull-downs. */
         case EVT_LEFTARROWKEY:
           if (event->val == KM_PRESS && (block->flag & BLOCK_LOOP)) {
-            if (block->saferct.first) {
+            if (block->saferct.first()) {
               menu->menuretval = RETURN_OUT;
             }
           }
@@ -12315,7 +12005,7 @@ static int handle_menu_event(bContext *C,
               }
 
               /* exception for rna layer buts */
-              if (but.rnapoin.data && but.rnaprop &&
+              if (but.rnapoin && but.rnaprop &&
                   ELEM(RNA_property_subtype(but.rnaprop), PROP_LAYER, PROP_LAYER_MEMBER))
               {
                 if (but.rnaindex == act - 1) {
@@ -12441,7 +12131,7 @@ static int handle_menu_event(bContext *C,
        * don't overwrite them, see: #61015.
        */
       if ((inside == false) && (menu->menuretval == 0)) {
-        SafetyRect *saferct = static_cast<SafetyRect *>(block->saferct.first);
+        SafetyRect *saferct = block->saferct.first();
 
         if (event->type == MOUSEMOVE) {
           WM_tooltip_clear(C, win);
@@ -12496,25 +12186,34 @@ static int handle_menu_event(bContext *C,
         menu->menuretval = RETURN_CANCEL;
       }
       else if (ELEM(event->type, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
+        Button *but_active = region_find_active_but(region);
         Button *but_default = region_find_first_but_test_flag(
             region, BUT_ACTIVE_DEFAULT, UI_HIDDEN);
-        if ((but_default != nullptr) && (but_default->active == nullptr)) {
-          if (but_default->type == ButtonType::But) {
-            button_execute(C, region, but_default);
-            retval = WM_UI_HANDLER_BREAK;
-          }
-          else {
-            handle_button_activate_by_type(C, region, but_default);
-          }
+        if (but_active && menu->keynav_state.is_keynav) {
+          /* Key-navigation activates the button navigated onto, not the default. */
         }
-        else {
-          Button *but_active = region_find_active_but(region);
+        else if ((but_default != nullptr) &&
+                 ((but_default->type == ButtonType::But) &&
+                  ((but_default->active == nullptr) ||
+                   (but_default->active->state == BUTTON_STATE_HIGHLIGHT))))
+        {
+          /* Regarding the #BUTTON_STATE_HIGHLIGHT check above.
+           * It's important to run immediately in this case. Letting the button flash first
+           * (see #BUTTON_STATE_WAIT_FLASH) delays running it until a timer fires,
+           * so events after "Return" reach the popup while it's still open and are lost.
+           * This can happen while typing quickly or a slow redraw.
+           * It also happens during tests that use simulated events. */
 
-          /* enter will always close this block, we let the event
-           * get handled by the button if it is activated, otherwise we cancel */
-          if (but_active == nullptr) {
-            menu->menuretval = RETURN_CANCEL | RETURN_POPUP_OK;
-          }
+          button_execute(C, region, but_default);
+          retval = WM_UI_HANDLER_BREAK;
+        }
+        else if ((but_default != nullptr) && (but_default->active == nullptr)) {
+          handle_button_activate_by_type(C, region, but_default);
+        }
+        /* enter will always close this block, we let the event
+         * get handled by the button if it is activated, otherwise we cancel */
+        else if (but_active == nullptr) {
+          menu->menuretval = RETURN_CANCEL | RETURN_POPUP_OK;
         }
       }
 #ifdef USE_DRAG_POPUP
@@ -12543,15 +12242,11 @@ static int handle_menu_event(bContext *C,
           mouse_motion_towards_check(block, menu, event->xy, is_parent_inside == false);
 
           /* Check for all parent rects, enables arrow-keys to be used. */
-          for (saferct = static_cast<SafetyRect *>(block->saferct.first); saferct;
-               saferct = saferct->next)
-          {
+          for (saferct = block->saferct.first(); saferct; saferct = saferct->next) {
             /* for mouse move we only check our own rect, for other
              * events we check all preceding block rects too to make
              * arrow keys navigation work */
-            if (event->type != MOUSEMOVE ||
-                saferct == static_cast<SafetyRect *>(block->saferct.first))
-            {
+            if (event->type != MOUSEMOVE || saferct == block->saferct.first()) {
               if (BLI_rctf_isect_pt(&saferct->parent, float(event->xy[0]), float(event->xy[1]))) {
                 break;
               }
@@ -12622,7 +12317,7 @@ static int handle_menu_event(bContext *C,
 static int handle_menu_return_submenu(bContext *C, const wmEvent *event, PopupBlockHandle *menu)
 {
   ARegion *region = menu->region;
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  Block *block = region->runtime->uiblocks.first();
 
   Button *but = region_find_active_but(region);
 
@@ -12747,7 +12442,7 @@ static int pie_handler(bContext *C, const wmEvent *event, PopupBlockHandle *menu
   }
 
   ARegion *region = menu->region;
-  Block *block = static_cast<Block *>(region->runtime->uiblocks.first);
+  Block *block = region->runtime->uiblocks.first();
 
   const bool is_click_style = (block->pie_data->flags & PIE_CLICK_STYLE);
 
@@ -13012,23 +12707,13 @@ static int handle_menus_recursive(bContext *C,
   int retval = WM_UI_HANDLER_CONTINUE;
   bool do_towards_reinit = false;
 
-#ifdef __ANDROID__
-  /* Android: guard against null menu/region/runtime/uiblocks which can occur
-   * when the first tap lands before the popup region is fully built. */
-  if (menu == nullptr || menu->region == nullptr || menu->region->runtime == nullptr ||
-      menu->region->runtime->uiblocks.is_empty())
-  {
-    return WM_UI_HANDLER_CONTINUE;
-  }
-#endif
-
   /* check if we have a submenu, and handle events for it first */
   Button *but = region_find_active_but(menu->region);
   HandleButtonData *data = (but) ? but->active : nullptr;
   PopupBlockHandle *submenu = (data) ? data->menu : nullptr;
 
   if (submenu) {
-    Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
+    Block *block = menu->region->runtime->uiblocks.first();
     const bool is_menu = block_is_menu(block);
     bool inside = false;
     /* root pie menus accept the key that spawned
@@ -13095,7 +12780,7 @@ static int handle_menus_recursive(bContext *C,
     }
 
     if (do_but_search) {
-      Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
+      Block *block = menu->region->runtime->uiblocks.first();
 
       retval = handle_menu_button(C, event, menu);
 
@@ -13108,15 +12793,18 @@ static int handle_menus_recursive(bContext *C,
       }
     }
     else {
-      Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
+      Block *block = menu->region->runtime->uiblocks.first();
 
       if (block->flag & BLOCK_PIE_MENU) {
         retval = pie_handler(C, event, menu);
       }
       else if (event->type == LEFTMOUSE || event->val != KM_DBL_CLICK) {
         bool handled = false;
-
-        if (Button *listbox = listbox_find_mouse_over(menu->region, event)) {
+        const bool is_actbut_in_modal_state = but && button_modal_state(but->active->state);
+        /* Handle uilist events if there not an active button in modal state. */
+        if (Button *listbox = listbox_find_mouse_over(menu->region, event);
+            listbox && !is_actbut_in_modal_state)
+        {
           const int retval_test = handle_uilist_event(C, event, menu->region, listbox);
           if (retval_test != WM_UI_HANDLER_CONTINUE) {
             retval = retval_test;
@@ -13347,11 +13035,6 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
   ARegion *region = region_popup ? region_popup : CTX_wm_region(C);
   int retval = WM_UI_HANDLER_CONTINUE;
 
-#ifdef __ANDROID__
-  /* Cleared first so only a flag raised by this event's own button handling counts. */
-  touch_scroll_pass_motion = false;
-#endif
-
   Button *but = region_find_active_but(region);
 
   if (but) {
@@ -13433,13 +13116,6 @@ static int handler_region_menu(bContext *C, const wmEvent *event, void * /*userd
     }
   }
 
-#ifdef __ANDROID__
-  if (touch_scroll_pass_motion) {
-    touch_scroll_pass_motion = false;
-    return WM_UI_HANDLER_CONTINUE;
-  }
-#endif
-
   /* we block all events, this is modal interaction */
   return WM_UI_HANDLER_BREAK;
 }
@@ -13476,10 +13152,10 @@ static int popup_handler(bContext *C, const wmEvent *event, void *userdata)
     wmWindow *win = CTX_wm_window(C);
     /* copy values, we have to free first (closes region) */
     const PopupBlockHandle temp = *menu;
-    Block *block = static_cast<Block *>(menu->region->runtime->uiblocks.first);
+    Block *block = menu->region->runtime->uiblocks.first();
 
     /* set last pie event to allow chained pie spawning */
-    if (block && (block->flag & BLOCK_PIE_MENU)) {
+    if (block->flag & BLOCK_PIE_MENU) {
       win->pie_event_type_last = block->pie_data->event_type;
       reset_pie = true;
     }
@@ -13565,6 +13241,17 @@ void popup_handlers_add(bContext *C,
                         PopupBlockHandle *popup,
                         const char flag)
 {
+#ifdef WITH_INPUT_IME
+  /* A popup is modal, end the region's IME session so key presses reach the popup.
+   * Button owned sessions are kept, the popup may belong to the button being edited
+   * (a search menu for e.g.), see #wmIMEOwnerType. */
+  if (wmWindow *win = CTX_wm_window(C)) {
+    if (win->runtime->ime_owner == bke::wmIMEOwnerType::Region) {
+      WM_window_IME_end(win);
+    }
+  }
+#endif
+
   WM_event_add_ui_handler(
       C, handlers, popup_handler, popup_handler_remove, popup, eWM_EventHandlerFlag(flag));
 }
@@ -13793,41 +13480,65 @@ void refresh_for_srna_unregister(Main *bmain, StructRNA *srna_to_unreg)
   CTX_free(C);
 }
 
+static Button *block_find_rna_text_button(Block &block,
+                                          const void *rna_poin_data,
+                                          const char *rna_prop_id)
+{
+  for (Button &but : block.buttons()) {
+    if (ELEM(but.type, ButtonType::Text, ButtonType::TextBox)) {
+      if (but.rnaprop && but.rnapoin.data == rna_poin_data) {
+        if (STREQ(RNA_property_identifier(but.rnaprop), rna_prop_id)) {
+          return &but;
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
+bool textbutton_activate_rna(const bContext *C,
+                             ARegion *region,
+                             const void *rna_poin_data,
+                             const char *rna_prop_id,
+                             Block &block)
+{
+  Button *but_text = block_find_rna_text_button(block, rna_poin_data, rna_prop_id);
+
+  if (!but_text) {
+    return false;
+  }
+
+  ARegion *region_ctx = CTX_wm_region(C);
+  /* Temporary context override for activating the button. */
+  CTX_wm_region_set(const_cast<bContext *>(C), region);
+  button_active_only(C, region, &block, but_text);
+  CTX_wm_region_set(const_cast<bContext *>(C), region_ctx);
+  return true;
+}
+
 bool textbutton_activate_rna(const bContext *C,
                              ARegion *region,
                              const void *rna_poin_data,
                              const char *rna_prop_id)
 {
-  Block *block_text = nullptr;
   Button *but_text = nullptr;
-
+  Block *block_text = nullptr;
   for (Block &block : region->runtime->uiblocks) {
-    for (Button &but : block.buttons()) {
-      if (but.type == ButtonType::Text) {
-        if (but.rnaprop && but.rnapoin.data == rna_poin_data) {
-          if (STREQ(RNA_property_identifier(but.rnaprop), rna_prop_id)) {
-            block_text = &block;
-            but_text = &but;
-            break;
-          }
-        }
-      }
-    }
+    but_text = block_find_rna_text_button(block, rna_poin_data, rna_prop_id);
+    block_text = &block;
     if (but_text) {
       break;
     }
   }
-
-  if (but_text) {
-    ARegion *region_ctx = CTX_wm_region(C);
-
-    /* Temporary context override for activating the button. */
-    CTX_wm_region_set(const_cast<bContext *>(C), region);
-    button_active_only(C, region, block_text, but_text);
-    CTX_wm_region_set(const_cast<bContext *>(C), region_ctx);
-    return true;
+  if (!but_text) {
+    return false;
   }
-  return false;
+  ARegion *region_ctx = CTX_wm_region(C);
+  /* Temporary context override for activating the button. */
+  CTX_wm_region_set(const_cast<bContext *>(C), region);
+  button_active_only(C, region, block_text, but_text);
+  CTX_wm_region_set(const_cast<bContext *>(C), region_ctx);
+  return true;
 }
 
 bool textbutton_activate_but(const bContext *C, Button *actbut)
@@ -14113,13 +13824,23 @@ std::optional<int2> try_activate_rna_button(bContext *C,
   ED_screen_set_active_region(C, CTX_wm_window(C), xy);
   ScrArea *current_screen = CTX_wm_area(C);
   ARegion *current_region = CTX_wm_region(C);
+  ARegion *current_popup_region = CTX_wm_region_popup(C);
+  const rctf button_rect = button->rect;
+
+  BLI_SCOPED_DEFER([&]() {
+    CTX_wm_area_set(C, current_screen);
+    CTX_wm_region_set(C, current_region);
+    CTX_wm_region_popup_set(C, current_popup_region);
+    /* Restore button position. */
+    button->rect = button_rect;
+  });
 
   CTX_wm_area_set(C, area);
   CTX_wm_region_set(C, region);
+  CTX_wm_region_popup_set(C, nullptr);
   /* Init button active data with state as #BUTTON_STATE_HIGHLIGHT */
   handle_button_activate(C, region, button, BUTTON_ACTIVATE);
 
-  const rctf button_rect = button->rect;
   /* Temporally override button position so its already in view when putting mouse over. */
   BLI_rctf_translate(
       &button->rect, region->v2d.cur.xmin - old_view_xy.x, old_view_xy.y - region->v2d.cur.ymin);
@@ -14130,7 +13851,7 @@ std::optional<int2> try_activate_rna_button(bContext *C,
     WM_cursor_warp(win, BLI_rctf_cent_x(&button_view_rect), BLI_rctf_cent_y(&button_view_rect));
   }
 
-  /* Disable textsearch interactive mode. */
+  /* Disable text-search interactive mode. */
   button->changed = false;
 
   if (button->flag & (BUT_DISABLED | UI_HIDDEN)) {
@@ -14161,7 +13882,7 @@ std::optional<int2> try_activate_rna_button(bContext *C,
     event.xy[0] = BLI_rctf_cent_x(&button_view_rect);
     event.xy[1] = BLI_rctf_cent_y(&button_view_rect);
     /* Use `ui_do_button` for #BUTTON_STATE_NUM_EDITING with a dummy event, some buttons do some
-     * aditional configurations on left click to start editing. */
+     * additional configurations on left click to start editing. */
     do_button(C, button->block, button, &event);
   }
 
@@ -14170,11 +13891,6 @@ std::optional<int2> try_activate_rna_button(bContext *C,
   {
     button_activate_state(C, button, BUTTON_STATE_WAIT_KEY_EVENT);
   }
-
-  CTX_wm_area_set(C, current_screen);
-  CTX_wm_region_set(C, current_region);
-  /* Restore button position. */
-  button->rect = button_rect;
 
   return int2{int(BLI_rctf_cent_x(&button_view_rect)), int(BLI_rctf_cent_y(&button_view_rect))};
 }

@@ -399,6 +399,57 @@ ccl_device_inline const ccl_global KernelOctreeRoot *volume_find_octree_root(
   return kroot;
 }
 
+template<const bool shadow, typename IntegratorGenericState>
+ccl_device bool volume_octree_setup_single(KernelGlobals kg,
+                                           const ccl_private Ray *ccl_restrict ray,
+                                           ccl_private ShaderData *ccl_restrict sd,
+                                           const IntegratorGenericState state,
+                                           const ccl_private RNGState *rng_state,
+                                           const PathRayVisibility path_visibility,
+                                           const uint32_t path_flag,
+                                           ccl_private OctreeTracing &local,
+                                           const VolumeStack skip,
+                                           const int index)
+{
+  const VolumeStack entry = volume_stack_read<shadow>(state, index);
+
+  if (entry.shader == SHADER_NONE) {
+    return false;
+  }
+
+  if (entry.object == skip.object && entry.shader == skip.shader) {
+    return true;
+  }
+
+  const ccl_global KernelOctreeRoot *kroot = volume_find_octree_root(kg, entry);
+
+  local.node = &kernel_data_fetch(volume_tree_nodes, kroot->id);
+  local.entry = entry;
+
+  /* Convert to object space. */
+  float3 local_P = ray->P, local_D = ray->D;
+  if (!(kernel_data_fetch(object_flag, entry.object) & SD_OBJECT_TRANSFORM_APPLIED)) {
+    const Transform itfm = object_fetch_transform(kg, entry.object, OBJECT_INVERSE_TRANSFORM);
+    local_P = transform_point(&itfm, ray->P);
+    local_D = transform_direction(&itfm, ray->D);
+  }
+
+  /* Convert to octree space. */
+  if (local.to_octree_space(local_P, local_D, kroot->scale, kroot->translation)) {
+    volume_voxel_get(kg, local);
+    local.t.max = local.ray_voxel_intersect(ray->tmax);
+  }
+  else {
+    /* Current ray segment lies outside of the octree, usually happens with implicit volume, i.e.
+     * everything behind a surface is considered as volume. */
+    local.t.max = ray->tmax;
+  }
+
+  local.sigma = volume_object_get_extrema<shadow>(
+      kg, ray, sd, state, local, rng_state, path_visibility, path_flag);
+  return true;
+}
+
 /* Find the current active ray segment.
  * We might have multiple overlapping octrees, so find the smallest `tmax` of all and store the
  * information of that octree in `OctreeTracing`.
@@ -423,43 +474,14 @@ ccl_device bool volume_octree_setup(KernelGlobals kg,
   int i = 0;
   for (;; i++) {
     /* Loop through all the object in the volume stack and find their octrees. */
-    const VolumeStack entry = volume_stack_read<shadow>(state, i);
-
-    if (entry.shader == SHADER_NONE) {
+    OctreeTracing local(global.t.min);
+    if (!volume_octree_setup_single<shadow>(
+            kg, ray, sd, state, rng_state, path_visibility, path_flag, local, skip, i))
+    {
       break;
     }
 
-    if (entry.object == skip.object && entry.shader == skip.shader) {
-      continue;
-    }
-
-    const ccl_global KernelOctreeRoot *kroot = volume_find_octree_root(kg, entry);
-
-    OctreeTracing local(global.t.min);
-    local.node = &kernel_data_fetch(volume_tree_nodes, kroot->id);
-    local.entry = entry;
-
-    /* Convert to object space. */
-    float3 local_P = ray->P, local_D = ray->D;
-    if (!(kernel_data_fetch(object_flag, entry.object) & SD_OBJECT_TRANSFORM_APPLIED)) {
-      const Transform itfm = object_fetch_transform(kg, entry.object, OBJECT_INVERSE_TRANSFORM);
-      local_P = transform_point(&itfm, ray->P);
-      local_D = transform_direction(&itfm, ray->D);
-    }
-
-    /* Convert to octree space. */
-    if (local.to_octree_space(local_P, local_D, kroot->scale, kroot->translation)) {
-      volume_voxel_get(kg, local);
-      local.t.max = local.ray_voxel_intersect(ray->tmax);
-    }
-    else {
-      /* Current ray segment lies outside of the octree, usually happens with implicit volume, i.e.
-       * everything behind a surface is considered as volume. */
-      local.t.max = ray->tmax;
-    }
-
-    global.sigma += volume_object_get_extrema<shadow>(
-        kg, ray, sd, state, local, rng_state, path_visibility, path_flag);
+    global.sigma += local.sigma;
     if (local.t.max <= global.t.max) {
       /* Replace the current active octree with the one that has the smallest `tmax`. */
       local.sigma = global.sigma;
@@ -715,7 +737,7 @@ ccl_device void volume_shadow_null_scattering(KernelGlobals kg,
   }
 }
 
-/* Equi-angular sampling as in:
+/* Equiangular sampling as in:
  * "Importance Sampling Techniques for Path Tracing in Participating Media" */
 
 /* Below this pdf we ignore samples, as they tend to lead to very long distances.
@@ -2613,6 +2635,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
     label = volume_shader_phase_guided_sample(kg,
                                               state,
                                               sd,
+                                              phases,
                                               svc,
                                               rand_phase,
                                               &phase_eval,
@@ -2631,7 +2654,7 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
 #  endif
   {
     label = volume_shader_phase_sample(
-        sd, svc, rand_phase, &phase_eval, &phase_wo, &phase_pdf, &sampled_roughness);
+        sd, phases, svc, rand_phase, &phase_eval, &phase_wo, &phase_pdf, &sampled_roughness);
 
     if (phase_pdf == 0.0f || bsdf_eval_is_zero(&phase_eval)) {
       return false;
@@ -2652,8 +2675,8 @@ ccl_device_forceinline bool integrate_volume_phase_scatter(
   INTEGRATOR_STATE_WRITE(state, ray, tmax) = FLT_MAX;
 #  ifdef __RAY_DIFFERENTIALS__
   INTEGRATOR_STATE_WRITE(state, ray, dP) = differential_make_compact(sd->dP);
-  INTEGRATOR_STATE_WRITE(state, ray, dD) = volume_phase_widen_dD(INTEGRATOR_STATE(state, ray, dD),
-                                                                 sampled_roughness);
+  INTEGRATOR_STATE_WRITE(state, ray, dD) = volume_phase_widen_dD(
+      kg, INTEGRATOR_STATE(state, ray, dD), sampled_roughness);
 #  endif
   // Save memory by storing last hit prim and object in isect
   INTEGRATOR_STATE_WRITE(state, isect, prim) = sd->prim;
@@ -2719,8 +2742,8 @@ volume_integrate_event(KernelGlobals kg,
   const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
   const float continuation_probability = (path_flag & PATH_RAY_TERMINATE_IN_NEXT_VOLUME) ?
                                              0.0f :
-                                             INTEGRATOR_STATE(
-                                                 state, path, continuation_probability);
+                                             float(INTEGRATOR_STATE(
+                                                 state, path, continuation_probability));
   if (continuation_probability == 0.0f) {
     return VOLUME_PATH_MISSED;
   }

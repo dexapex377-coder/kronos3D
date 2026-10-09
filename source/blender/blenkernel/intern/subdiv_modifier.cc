@@ -2,6 +2,10 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/** \file
+ * \ingroup bke
+ */
+
 #include "BKE_subdiv_modifier.hh"
 
 #include "MEM_guardedalloc.h"
@@ -91,13 +95,6 @@ static bool is_subdivision_evaluation_possible_on_gpu()
   }
 
   if (GPU_max_compute_shader_storage_blocks() < MAX_GPU_SUBDIV_SSBOS) {
-    return false;
-  }
-
-  if (GPU_subdivision_evaluation_broken()) {
-    /* The driver accepted the shader module but refused the compute pipeline, so the evaluator
-     * would run a substituted do-nothing pipeline and hand back empty buffers. Evaluate on the
-     * CPU instead: slower, but it produces the surface. */
     return false;
   }
 

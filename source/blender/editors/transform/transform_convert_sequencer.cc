@@ -18,6 +18,8 @@
 
 #include "BKE_context.hh"
 
+#include "RNA_access.hh"
+
 #include "ED_markers.hh"
 #include "ED_sequencer.hh"
 
@@ -277,9 +279,7 @@ static void seq_transform_cancel(TransInfo *t, Span<Strip *> transformed_strips)
   for (Strip *strip : transformed_strips) {
     /* Handle pre-existing overlapping strips even when operator is canceled.
      * This is necessary for #SEQUENCER_OT_duplicate_move macro for example. */
-    if (seq::transform_test_overlap(scene, seqbase, strip)) {
-      seq::transform_seqbase_shuffle(seqbase, strip, scene);
-    }
+    seq::transform_shuffle_vertical(seqbase, {strip}, scene);
   }
 }
 
@@ -315,13 +315,16 @@ static void freeSeqData(TransInfo *t, TransDataContainer *tc, TransCustomData *c
 {
   Scene *scene = CTX_data_sequencer_scene(t->context);
   Editing *ed = seq::editing_get(scene);
+  TransSeq *ts = static_cast<TransSeq *>(tc->custom.type.data);
   if (ed == nullptr) {
     free_transform_custom_data(custom_data);
     return;
   }
 
+  ed->edit_point_set(scene, std::nullopt);
+
   VectorSet transformed_strips = seq_transform_collection_from_transdata(tc);
-  seq::iterator_set_expand(ed, transformed_strips, seq::query_strip_direct_effect_chain);
+  seq::expand_strips(ed, transformed_strips, seq::StripRelation::Effects);
 
   for (Strip *strip : transformed_strips) {
     strip->runtime->flag &= ~(seq::StripRuntimeFlag::ClampedLH | seq::StripRuntimeFlag::ClampedRH);
@@ -329,18 +332,10 @@ static void freeSeqData(TransInfo *t, TransDataContainer *tc, TransCustomData *c
   }
 
   if (t->state == TRANS_CANCEL) {
+    seq::tool_settings_overlap_mode_set(scene, ts->overlap_mode_orig);
     seq_transform_cancel(t, transformed_strips);
     free_transform_custom_data(custom_data);
     return;
-  }
-
-  TransSeq *ts = static_cast<TransSeq *>(tc->custom.type.data);
-  ListBaseT<Strip> *seqbasep = seqbase_active_get(t);
-  const bool use_sync_markers = ((static_cast<SpaceSeq *>(t->area->spacedata.first))->flag &
-                                 SEQ_MARKER_TRANS) != 0;
-  if (seq_transform_check_overlap(transformed_strips)) {
-    seq::transform_handle_overlap(
-        scene, seqbasep, transformed_strips, ts->time_dependent_strips, use_sync_markers);
   }
 
   DEG_id_tag_update(&scene->id, ID_RECALC_SEQUENCER_STRIPS);
@@ -401,7 +396,7 @@ static void query_time_dependent_strips_strips(TransInfo *t,
   VectorSet<Strip *> strips_no_handles = query_selected_strips_no_handles(seqbase);
   time_dependent_strips.add_multiple(strips_no_handles);
 
-  seq::iterator_set_expand(ed, strips_no_handles, seq::query_strip_effect_chain);
+  seq::expand_strips(ed, strips_no_handles, seq::StripRelation::EffectChain);
   bool strip_added = true;
 
   while (strip_added) {
@@ -428,7 +423,7 @@ static void query_time_dependent_strips_strips(TransInfo *t,
    * With single input effect, it is less likely desirable to move animation. */
 
   VectorSet selected_strips = seq::query_selected_strips(seqbase);
-  seq::iterator_set_expand(ed, selected_strips, seq::query_strip_effect_chain);
+  seq::expand_strips(ed, selected_strips, seq::StripRelation::EffectChain);
   for (Strip *strip : selected_strips) {
     /* Check only 2 input effects. */
     if (strip->input1 == nullptr || strip->input2 == nullptr) {
@@ -474,8 +469,11 @@ static void create_trans_seq_clamp_data(TransInfo *t, const Scene *scene)
     }
   }
 
-  /* Try to clamp handles by default. */
-  t->modifiers |= MOD_STRIP_CLAMP_HOLDS;
+  const bool clamp_default = (U.sequencer_editor_flag & USER_SEQ_ED_CLAMP_STRIPS_BY_DEFAULT);
+  if (clamp_default) {
+    t->modifiers |= MOD_STRIP_CLAMP_HOLDS;
+  }
+
   ts->hold_clamp_min = INT_MIN;
   ts->hold_clamp_max = INT_MAX;
   for (Strip *strip : strips) {
@@ -487,7 +485,7 @@ static void create_trans_seq_clamp_data(TransInfo *t, const Scene *scene)
     bool right_sel = (strip->flag & SEQ_RIGHTSEL);
 
     /* If any strips start out with hold offsets visible, disable handle clamping on init. */
-    if ((strip->startofs < 0 || strip->end_offset() < 0) &&
+    if (clamp_default && (strip->startofs < 0 || strip->end_offset() < 0) &&
         !seq::transform_single_image_check(strip))
     {
       t->modifiers &= ~MOD_STRIP_CLAMP_HOLDS;
@@ -540,6 +538,14 @@ static void create_trans_seq_clamp_data(TransInfo *t, const Scene *scene)
   if (only_handles_selected) {
     ts->offset_clamp.ymin = 0;
     ts->offset_clamp.ymax = 0;
+  }
+
+  /* If either axis is locked (min/max offset is zero), then movement is only possible along one
+   * axis, and distinguishing them makes no sense, so just disable both axis constraints. */
+  if ((ts->offset_clamp.xmin == 0 && ts->offset_clamp.xmax == 0) ||
+      (ts->offset_clamp.ymin == 0 && ts->offset_clamp.ymax == 0))
+  {
+    t->flag |= T_NO_CONSTRAINT;
   }
 }
 
@@ -606,6 +612,8 @@ static void createTransSeqData(bContext *C, TransInfo *t)
   create_trans_seq_clamp_data(t, scene);
 
   query_time_dependent_strips_strips(t, ts->time_dependent_strips);
+
+  ts->overlap_mode_orig = seq::tool_settings_overlap_mode_get(scene);
 }
 
 /** \} */
@@ -752,8 +760,7 @@ static void flushTransSeq(TransInfo *t)
   /* Need to do the overlap check in a new loop otherwise adjacent strips
    * will not be updated and we'll get false positives. */
   VectorSet transformed_strips = seq_transform_collection_from_transdata(tc);
-  seq::iterator_set_expand(
-      seq::editing_get(scene), transformed_strips, seq::query_strip_direct_effect_chain);
+  seq::expand_strips(seq::editing_get(scene), transformed_strips, seq::StripRelation::Effects);
 
   for (Strip *strip : transformed_strips) {
     /* Test overlap, displays red outline. */
@@ -762,6 +769,22 @@ static void flushTransSeq(TransInfo *t)
       strip->runtime->flag |= seq::StripRuntimeFlag::Overlap;
     }
   }
+}
+
+static void seq_transform_edit_point_update(Scene *scene)
+{
+  Editing *ed = seq::editing_get(scene);
+  const Strip *strip = ed->act_strip;
+  std::optional<int> edit_point;
+  if (strip != nullptr && (strip->flag & SEQ_SELECT)) {
+    if (strip->flag & SEQ_RIGHTSEL) {
+      edit_point = strip->right_handle(scene) - 1;
+    }
+    else if (strip->flag & SEQ_LEFTSEL) {
+      edit_point = strip->left_handle();
+    }
+  }
+  ed->edit_point_set(scene, edit_point);
 }
 
 static void recalcData_sequencer(TransInfo *t)
@@ -788,6 +811,7 @@ static void recalcData_sequencer(TransInfo *t)
   DEG_id_tag_update(&scene->id, ID_RECALC_SEQUENCER_STRIPS);
 
   flushTransSeq(t);
+  seq_transform_edit_point_update(scene);
 }
 
 /** \} */
@@ -796,25 +820,65 @@ static void recalcData_sequencer(TransInfo *t)
 /** \name Special After Transform Sequencer
  * \{ */
 
-static void special_aftertrans_update__sequencer(bContext *C, TransInfo *t)
+static void seq_transform_handle_overlap(Scene *scene,
+                                         TransDataContainer *tc,
+                                         wmOperator *op,
+                                         const bool use_sync_markers)
 {
-  Scene *scene = CTX_data_sequencer_scene(C);
-  SpaceSeq *sseq = static_cast<SpaceSeq *>(t->area->spacedata.first);
-  if ((sseq->flag & SPACE_SEQ_DESELECT_STRIP_HANDLE) != 0 &&
-      transform_mode_edge_seq_slide_use_restore_handle_selection(t))
-  {
-    TransDataContainer *tc = TRANS_DATA_CONTAINER_FIRST_SINGLE(t);
-    VectorSet<Strip *> strips = seq_transform_collection_from_transdata(tc);
-    for (Strip *strip : strips) {
-      strip->flag &= ~(SEQ_LEFTSEL | SEQ_RIGHTSEL);
-    }
+  const TransSeq *ts = static_cast<TransSeq *>(tc->custom.type.data);
+
+  Editing *ed = seq::editing_get(scene);
+  VectorSet transformed_strips = seq_transform_collection_from_transdata(tc);
+  seq::expand_strips(ed, transformed_strips, seq::StripRelation::Effects);
+  if (!seq_transform_check_overlap(transformed_strips)) {
+    return;
   }
 
+  eSeqOverlapMode overlap_mode = seq::tool_settings_overlap_mode_get(scene);
+  eSeqRippleFlag ripple_flag = seq::tool_settings_ripple_flag_get(scene);
+  /* We need to check that the props exist because "time extend" on `E` press can reach here. */
+  if (op != nullptr && RNA_struct_property_is_set(op->ptr, "overlap_mode")) {
+    overlap_mode = eSeqOverlapMode(RNA_enum_get(op->ptr, "overlap_mode"));
+    SET_FLAG_FROM_TEST(
+        ripple_flag, RNA_boolean_get(op->ptr, "all_channels"), SEQ_RIPPLE_ALL_CHANNELS);
+    SET_FLAG_FROM_TEST(ripple_flag, RNA_boolean_get(op->ptr, "markers"), SEQ_RIPPLE_MARKERS);
+    SET_FLAG_FROM_TEST(ripple_flag, RNA_boolean_get(op->ptr, "insert"), SEQ_RIPPLE_INSERT);
+  }
+
+  seq::transform_handle_overlap(scene,
+                                seq::active_seqbase_get(ed),
+                                transformed_strips,
+                                use_sync_markers,
+                                overlap_mode,
+                                ripple_flag,
+                                ts->time_dependent_strips);
+}
+
+/* Restore handles to their deselected state. */
+static void seq_transform_restore_handle_selection(TransDataContainer *tc)
+{
+  VectorSet<Strip *> strips = seq_transform_collection_from_transdata(tc);
+  for (Strip *strip : strips) {
+    strip->flag &= ~(SEQ_LEFTSEL | SEQ_RIGHTSEL);
+  }
+}
+
+static void special_aftertrans_update__sequencer(bContext *C, TransInfo *t)
+{
+  TransDataContainer *tc = TRANS_DATA_CONTAINER_FIRST_SINGLE(t);
+  Scene *scene = CTX_data_sequencer_scene(C);
+  SpaceSeq *sseq = t->area->spacedata.first_as<SpaceSeq>();
+
+  const bool deselect_handles = (sseq->flag & SPACE_SEQ_DESELECT_STRIP_HANDLE) != 0 &&
+                                transform_mode_edge_seq_slide_use_restore_handle_selection(t);
   sseq->flag &= ~SPACE_SEQ_DESELECT_STRIP_HANDLE;
 
   /* #freeSeqData in `transform_conversions.cc` does this
    * keep here so the `else` at the end won't run. */
   if (t->state == TRANS_CANCEL) {
+    if (deselect_handles) {
+      seq_transform_restore_handle_selection(tc);
+    }
     return;
   }
 
@@ -834,6 +898,17 @@ static void special_aftertrans_update__sequencer(bContext *C, TransInfo *t)
       ED_markers_post_apply_transform(
           &scene->markers, scene, TFM_TIME_EXTEND, t->values_final[0], t->frame_side);
     }
+  }
+
+  seq_transform_handle_overlap(scene,
+                               tc,
+                               transform_mode_edge_seq_slide_operator_get(t),
+                               (sseq->flag & SEQ_MARKER_TRANS) != 0);
+
+  vse::sync_active_scene_and_time_with_scene_strip(*C);
+
+  if (deselect_handles) {
+    seq_transform_restore_handle_selection(tc);
   }
 }
 

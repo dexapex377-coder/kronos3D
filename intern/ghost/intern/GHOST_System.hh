@@ -87,17 +87,6 @@ class GHOST_System : public GHOST_ISystem {
   void setAutoFocus(const bool auto_focus) override;
   bool auto_focus_;
 
-  /** \copydoc #GHOST_ISystem::popupOnScreenKeyboard */
-  GHOST_TSuccess popupOnScreenKeyboard(GHOST_IWindow * /*window*/) override
-  {
-    return GHOST_kFailure;
-  }
-  /** \copydoc #GHOST_ISystem::hideOnScreenKeyboard */
-  GHOST_TSuccess hideOnScreenKeyboard(GHOST_IWindow * /*window*/) override
-  {
-    return GHOST_kFailure;
-  }
-
   /** \copydoc #GHOST_ISystem::getWindowUnderCursor */
   GHOST_IWindow *getWindowUnderCursor(int32_t x, int32_t y) override;
   GHOST_CSD_Params window_csd_params_;

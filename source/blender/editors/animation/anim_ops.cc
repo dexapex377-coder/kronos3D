@@ -31,6 +31,7 @@
 #include "BKE_node.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_scene_context.hh"
 
 #include "BLT_translation.hh"
 
@@ -139,7 +140,7 @@ static bool change_frame_poll(bContext *C)
       }
     }
     if (area->spacetype == SPACE_GRAPH) {
-      const SpaceGraph *sipo = static_cast<const SpaceGraph *>(area->spacedata.first);
+      const SpaceGraph *sipo = area->spacedata.first_as<SpaceGraph>();
       /* Driver Editor's X axis is not time. */
       if (sipo->mode != SIPO_MODE_DRIVERS) {
         return true;
@@ -498,8 +499,7 @@ static float apply_frame_snap(bContext *C, FrameChangeModalData &op_data, const 
   ScrArea *area = CTX_wm_area(C);
 
   Vector<SnapTarget> targets;
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return frame;
   }
@@ -557,8 +557,7 @@ static float apply_frame_snap(bContext *C, FrameChangeModalData &op_data, const 
 /* Set the new frame number */
 static void change_frame_apply(bContext *C, wmOperator *op, const bool always_update)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return;
   }
@@ -620,8 +619,7 @@ static wmOperatorStatus change_frame_exec(bContext *C, wmOperator *op)
 static float frame_from_event(bContext *C, const wmEvent *event)
 {
   ARegion *region = CTX_wm_region(C);
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   float frame;
 
   /* convert from region coordinates to View2D 'tot' space */
@@ -656,8 +654,7 @@ static void change_frame_seq_preview_end(SpaceSeq *sseq)
 
 static bool use_playhead_snapping(bContext *C)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return false;
   }
@@ -665,7 +662,7 @@ static bool use_playhead_snapping(bContext *C)
   ScrArea *area = CTX_wm_area(C);
 
   if (area->spacetype == SPACE_GRAPH) {
-    SpaceGraph *graph_editor = static_cast<SpaceGraph *>(area->spacedata.first);
+    SpaceGraph *graph_editor = area->spacedata.first_as<SpaceGraph>();
     /* Snapping is disabled for driver mode. Need to evaluate if it makes sense there and what form
      * it should take. */
     if (graph_editor->mode == SIPO_MODE_DRIVERS) {
@@ -922,8 +919,7 @@ static bool anim_set_end_frames_poll(bContext *C)
 
 static wmOperatorStatus anim_set_sfra_exec(bContext *C, wmOperator *op)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   int frame;
 
   if (scene == nullptr) {
@@ -978,8 +974,7 @@ static void ANIM_OT_start_frame_set(wmOperatorType *ot)
 
 static wmOperatorStatus anim_set_efra_exec(bContext *C, wmOperator *op)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   int frame;
 
   if (scene == nullptr) {
@@ -1040,8 +1035,7 @@ static void ANIM_OT_end_frame_set(wmOperatorType *ot)
 
 static wmOperatorStatus previewrange_define_exec(bContext *C, wmOperator *op)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return OPERATOR_CANCELLED;
   }
@@ -1108,8 +1102,7 @@ static void ANIM_OT_previewrange_set(wmOperatorType *ot)
 
 static wmOperatorStatus previewrange_clear_exec(bContext *C, wmOperator * /*op*/)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   ScrArea *curarea = CTX_wm_area(C);
 
   /* sanity checks */
@@ -1204,8 +1197,7 @@ static void ANIM_OT_debug_channel_list(wmOperatorType *ot)
 
 static wmOperatorStatus scene_range_frame_exec(bContext *C, wmOperator * /*op*/)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  const Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  const Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return OPERATOR_CANCELLED;
   }
@@ -1430,12 +1422,19 @@ static wmOperatorStatus replace_action_exec(bContext *C, wmOperator *op)
   bAction *new_action = reinterpret_cast<bAction *>(
       BKE_libblock_find_session_uid(bmain, ID_AC, new_session_uid));
 
-  if (!old_action || !new_action || old_action == new_action) {
+  if (!old_action || !new_action) {
     BKE_reportf(op->reports,
                 RPT_ERROR_INVALID_INPUT,
                 "Invalid old/new Action pair ('%s' / '%s')",
-                old_action ? old_action->id.name : "Invalid UID",
-                new_action ? new_action->id.name : "Invalid UID");
+                old_action ? old_action->id.name + 2 : "Invalid UID",
+                new_action ? new_action->id.name + 2 : "Invalid UID");
+    return OPERATOR_CANCELLED;
+  }
+  if (old_action == new_action) {
+    BKE_reportf(op->reports,
+                RPT_ERROR_INVALID_INPUT,
+                "Cannot replace Action with itself ('%s')",
+                old_action->id.name + 2);
     return OPERATOR_CANCELLED;
   }
 
@@ -1650,33 +1649,6 @@ static void ANIM_OT_replace_action_new(wmOperatorType *ot)
 /** \name Convert
  * \{ */
 
-static Vector<ed::AnimTransformable> selected_transformables_from_context(bContext *C)
-{
-  Vector<ed::AnimTransformable> transformables;
-  Vector<PointerRNA> pointers;
-  switch (CTX_data_mode_enum(C)) {
-    case CTX_MODE_OBJECT: {
-      CTX_data_selected_objects(C, &pointers);
-      for (PointerRNA &ptr : pointers) {
-        transformables.append(ed::AnimTransformable(*id_cast<Object *>(ptr.owner_id)));
-      }
-      break;
-    }
-    case CTX_MODE_POSE: {
-      CTX_data_selected_pose_bones(C, &pointers);
-      for (PointerRNA &ptr : pointers) {
-        transformables.append(
-            {*id_cast<Object *>(ptr.owner_id), *static_cast<bPoseChannel *>(ptr.data)});
-      }
-      break;
-    }
-
-    default:
-      break;
-  }
-  return transformables;
-}
-
 /* Uniquely identifies an AnimTransformable for a Slot. The StringRefNull is the `rna_path()` of
  * the AnimTransformable.  */
 using SlotTransformableID = std::pair<const animrig::Slot *, StringRefNull>;
@@ -1732,7 +1704,8 @@ static wmOperatorStatus rotation_mode_convert_exec(bContext *C, wmOperator *op)
 
   Main *bmain = CTX_data_main(C);
 
-  Vector<ed::AnimTransformable> selected_transformables = selected_transformables_from_context(C);
+  Vector<ed::AnimTransformable> selected_transformables = ed::selected_transformables_from_context(
+      *C);
   for (ed::AnimTransformable &transformable : selected_transformables) {
     /* We cannot skip transformables based on their current rotation mode since that may be
      * animated. So `transformable.get_rotation_mode() == mode -> continue` won't work.*/
@@ -1910,6 +1883,9 @@ void ED_operatortypes_anim()
   WM_operatortype_append(ed::animrig::POSELIB_OT_create_pose_asset);
   WM_operatortype_append(ed::animrig::POSELIB_OT_asset_modify);
   WM_operatortype_append(ed::animrig::POSELIB_OT_asset_delete);
+
+  WM_operatortype_append(ed::animrig::ANIM_OT_world_space_copy);
+  WM_operatortype_append(ed::animrig::ANIM_OT_world_space_paste);
 }
 
 void ED_keymap_anim(wmKeyConfig *keyconf)

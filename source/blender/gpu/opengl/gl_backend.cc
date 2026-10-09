@@ -312,6 +312,11 @@ void GLBackend::platform_init()
       std::cout << "Error: The OpenGL implementation doesn't support ARB_clip_control\n";
       support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
     }
+
+    if (!epoxy_has_gl_extension("GL_ARB_get_texture_sub_image")) {
+      std::cout << "Error: The OpenGL implementation doesn't support ARB_get_texture_sub_image\n";
+      support_level = GPU_SUPPORT_LEVEL_UNSUPPORTED;
+    }
   }
 
   /* Compute shaders have some issues with those versions (see #94936). */
@@ -404,7 +409,7 @@ static void detect_workarounds()
     printf("    renderer: %s\n", renderer);
     printf("    version: %s\n\n", version);
     GCaps.depth_blitting_workaround = true;
-    GCaps.stencil_clasify_buffer_workaround = true;
+    GCaps.stencil_classify_buffer_workaround = true;
     GCaps.texture_pool_workaround = true;
     GLContext::debug_layer_workaround = true;
     /* Turn off Blender features. */
@@ -521,13 +526,15 @@ static void detect_workarounds()
        * GPU driver renders the cube correctly. This will be changed when a working driver version
        * is released to commercial devices to only enable this flags on older drivers. */
       if (ver0 == 31) {
-        GCaps.stencil_clasify_buffer_workaround = true;
+        GCaps.stencil_classify_buffer_workaround = true;
       }
 
       /* Disable OpenGL texture pool on Snapdragon 8cx Gen 3 devices. See #142229. We assume that
        * these devices use driver 30.x.x.x */
       if (ver0 == 30) {
         GCaps.texture_pool_workaround = true;
+        /* sRGB texture writes through non-sRGB texture view fails on these devices. */
+        GCaps.srgb_write_view_support = false;
       }
     }
   }
@@ -565,7 +572,7 @@ static void detect_workarounds()
       }
     }
 
-    /* #107642, #120273 The legacy Intel 7-10th Gen Processsor iGPU driver incorrectly reports that
+    /* #107642, #120273 The legacy Intel 7-10th Gen Processor iGPU driver incorrectly reports that
      * image binding is supported. But when used it results in `GL_INVALID_OPERATION` with
      * `internal format of texture N is not supported`. 101.5972 is the oldest checked driver where
      * it was manually confirmed that this issue is no longer present on newer driver versions. */
@@ -621,7 +628,6 @@ bool GLContext::derivative_control_support = false;
 
 bool GLContext::debug_layer_workaround = false;
 bool GLContext::unused_fb_slot_workaround = false;
-bool GLContext::generate_mipmap_workaround = false;
 
 void GLBackend::capabilities_init()
 {
@@ -645,6 +651,10 @@ void GLBackend::capabilities_init()
                             epoxy_has_gl_extension("GL_ATI_meminfo");
   GCaps.geometry_shader_support = true;
   GCaps.hdr_viewport_support = false;
+  GCaps.multi_viewport_support = true;
+  GCaps.vertex_pipeline_stores_and_atomics_support = true;
+
+  GCaps.srgb_write_view_support = true;
 
   glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &GCaps.max_work_group_count[0]);
   glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &GCaps.max_work_group_count[1]);
@@ -819,17 +829,15 @@ void GLBackend::log_workarounds()
   CLOG_DEBUG(&LOG,
              "OpenGL Workarounds\n"
              " - [%c] Debug layer workaround\n"
-             " - [%c] Generate mipmap workaround\n"
              " - [%c] Unused framebuffer slot workaround\n"
              " - [%c] Depth blitting workaround\n"
              " - [%c] Stencil classify buffer workaround\n"
              " - [%c] High-quality normals\n"
              " - [%c] Use main context\n",
              GLContext::debug_layer_workaround ? 'X' : ' ',
-             GLContext::generate_mipmap_workaround ? 'X' : ' ',
              GLContext::unused_fb_slot_workaround ? 'X' : ' ',
              GCaps.depth_blitting_workaround ? 'X' : ' ',
-             GCaps.stencil_clasify_buffer_workaround ? 'X' : ' ',
+             GCaps.stencil_classify_buffer_workaround ? 'X' : ' ',
              GCaps.use_hq_normals_workaround ? 'X' : ' ',
              GCaps.use_main_context_workaround ? 'X' : ' ');
 }

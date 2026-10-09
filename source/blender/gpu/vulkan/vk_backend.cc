@@ -8,20 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <mutex>
-#include <set>
 #include <sstream>
-#include <string>
-
-#ifdef WITH_ADRENOTOOLS
-#  include <adrenotools/driver.h>
-#  include <android/log.h>
-#  include <cstdlib>
-#  include <dlfcn.h>
-#  include <string>
-#  include <sys/system_properties.h>
-#  include <unistd.h>
-#endif
 
 #include "BLI_path_utils.hh"
 #include "BLI_string.hh"
@@ -30,6 +17,7 @@
 #include "CLG_log.h"
 
 #include "GPU_capabilities.hh"
+#include "GPU_framebuffer.hh"
 #include "gpu_capabilities_private.hh"
 #include "gpu_platform_private.hh"
 
@@ -49,6 +37,7 @@
 #include "vk_texture_pool.hh"
 #include "vk_uniform_buffer.hh"
 #include "vk_vertex_buffer.hh"
+#include "vk_work_in_flight.hh"
 
 #include "vk_backend.hh"
 
@@ -155,57 +144,6 @@ bool GPU_vulkan_is_supported_driver(VkPhysicalDevice vk_physical_device)
 static Vector<StringRefNull> missing_capabilities_get(VkPhysicalDevice vk_physical_device)
 {
   Vector<StringRefNull> missing_capabilities;
-  /* Check device features. */
-  VkPhysicalDeviceVulkan12Features features_12 = {
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-  VkPhysicalDeviceVulkan11Features features_11 = {
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &features_12};
-  VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-                                        &features_11};
-
-  vkGetPhysicalDeviceFeatures2(vk_physical_device, &features);
-
-#ifndef __APPLE__
-  /* Features currently not supported by Mesa KosmicKrisp. */
-  if (features.features.geometryShader == VK_FALSE) {
-    missing_capabilities.append("geometry shaders");
-  }
-#endif
-  if (features.features.vertexPipelineStoresAndAtomics == VK_FALSE) {
-    missing_capabilities.append("vertex pipeline stores and atomics");
-  }
-  /* multiViewport, logicOp and provoking-vertex are not hard requirements: the
-   * backend already treats logic_ops as optional, the framebuffer falls back to a
-   * single viewport, and provoking vertex only affects the flat-shading vertex
-   * convention. Requiring them excludes otherwise-capable mobile GPUs (all Adreno
-   * lack logicOp), so they are not rejected here. */
-  if (features.features.shaderClipDistance == VK_FALSE) {
-    missing_capabilities.append("shader clip distance");
-  }
-  if (features.features.fragmentStoresAndAtomics == VK_FALSE) {
-    missing_capabilities.append("fragment stores and atomics");
-  }
-  if (features.features.dualSrcBlend == VK_FALSE) {
-    missing_capabilities.append("dual source blending");
-  }
-  if (features.features.imageCubeArray == VK_FALSE) {
-    missing_capabilities.append("image cube array");
-  }
-  if (features.features.multiDrawIndirect == VK_FALSE) {
-    missing_capabilities.append("multi draw indirect");
-  }
-  if (features.features.drawIndirectFirstInstance == VK_FALSE) {
-    missing_capabilities.append("draw indirect first instance");
-  }
-  if (features_11.shaderDrawParameters == VK_FALSE) {
-    missing_capabilities.append("shader draw parameters");
-  }
-  if (features_12.timelineSemaphore == VK_FALSE) {
-    missing_capabilities.append("timeline semaphores");
-  }
-  if (features_12.bufferDeviceAddress == VK_FALSE) {
-    missing_capabilities.append("buffer device address");
-  }
 
   /* Check device extensions. */
   uint32_t vk_extension_count;
@@ -222,9 +160,41 @@ static Vector<StringRefNull> missing_capabilities_get(VkPhysicalDevice vk_physic
   if (!extensions.contains(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
     missing_capabilities.append(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   }
-  /* VK_KHR_dynamic_rendering (core in Vulkan 1.3) is not required: when absent the
-   * backend falls back to classic render passes. Provoking vertex is likewise
-   * optional (only the flat-shading vertex convention differs without it). */
+  if (!extensions.contains(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+    missing_capabilities.append(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+  }
+  if (!extensions.contains(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)) {
+    missing_capabilities.append(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+  }
+  if (!extensions.contains(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+    missing_capabilities.append(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+  }
+  if (!extensions.contains(VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME)) {
+    missing_capabilities.append(VK_KHR_SEPARATE_DEPTH_STENCIL_LAYOUTS_EXTENSION_NAME);
+  }
+
+  /* Check device features. */
+  VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+  vkGetPhysicalDeviceFeatures2(vk_physical_device, &features);
+
+#ifndef __APPLE__
+  /* Features currently not supported by Mesa KosmicKrisp. */
+  if (features.features.geometryShader == VK_FALSE) {
+    missing_capabilities.append("geometry shaders");
+  }
+#endif
+  if (features.features.fragmentStoresAndAtomics == VK_FALSE) {
+    missing_capabilities.append("fragment stores and atomics");
+  }
+  if (features.features.dualSrcBlend == VK_FALSE) {
+    missing_capabilities.append("dual source blending");
+  }
+  if (features.features.imageCubeArray == VK_FALSE) {
+    missing_capabilities.append("image cube array");
+  }
+  if (features.features.drawIndirectFirstInstance == VK_FALSE) {
+    missing_capabilities.append("draw indirect first instance");
+  }
 
   return missing_capabilities;
 }
@@ -238,7 +208,6 @@ static Vector<StringRefNull> missing_capabilities_get(VkPhysicalDevice vk_physic
  * Must be called before any `vkCreateInstance` so temporary Vulkan instances created during
  * argument handling (e.g. `--gpu-device help`) don't load implicit layers either.
  */
-#ifndef __ANDROID__
 static void vk_restrict_loader_layers()
 {
   std::stringstream allowed_layers;
@@ -254,111 +223,12 @@ static void vk_restrict_loader_layers()
   BLI_setenv("VK_LOADER_LAYERS_DISABLE", "~implicit~");
   BLI_setenv("VK_LOADER_LAYERS_ALLOW", allowed_layers.str().c_str());
 }
-#endif
-
-#ifdef WITH_ADRENOTOOLS
-/**
- * Load Mesa Turnip in place of the vendor driver.
- *
- * Both the hook libraries and the driver ship in the app's nativeLibraryDir,
- * derived from our own library's path. Going through adrenotools rather than
- * opening the driver directly keeps the platform loader in the chain, and the
- * loader is what implements VK_KHR_swapchain -- a driver reached on its own
- * exposes no WSI at all.
- */
-static bool android_try_load_turnip()
-{
-  Dl_info info = {};
-  if (dladdr(reinterpret_cast<const void *>(&android_try_load_turnip), &info) == 0 ||
-      info.dli_fname == nullptr)
-  {
-    return false;
-  }
-  std::string native_lib_dir = info.dli_fname;
-  const size_t slash = native_lib_dir.find_last_of('/');
-  if (slash == std::string::npos) {
-    return false;
-  }
-  native_lib_dir.resize(slash + 1);
-
-  const char *driver_dir = native_lib_dir.c_str();
-  const char *driver_name = "libvulkan_turnip.so";
-  const std::string driver_path = native_lib_dir + driver_name;
-
-  /* Only the Turnip flavour of the APK ships the driver, so its presence is what
-   * selects it. A build cannot be told apart at runtime any other way, and users
-   * installing a release have no means of setting a property. */
-  char prop[PROP_VALUE_MAX] = {};
-  const bool use_turnip = (__system_property_get("debug.blender.turnip", prop) > 0) ?
-                              (atoi(prop) != 0) :
-                              (access(driver_path.c_str(), R_OK) == 0);
-  if (!use_turnip) {
-    return false;
-  }
-
-  /* Tiled rendering faults the GPU on a7xx within a second or two of the first
-   * frame, so draw straight to system memory instead. Mesa reads its tunables
-   * from the environment before system properties, and an app may not read the
-   * vendor.* ones, which makes this the only way to reach them in-process. */
-  char tu_debug[PROP_VALUE_MAX] = {};
-  if (__system_property_get("debug.blender.tu_debug", tu_debug) <= 0) {
-    BLI_strncpy(tu_debug, "sysmem", sizeof(tu_debug));
-  }
-  setenv("TU_DEBUG", tu_debug, 1);
-  __android_log_print(ANDROID_LOG_INFO, "blender-turnip", "TU_DEBUG=%s", tu_debug);
-
-  void *libvulkan = adrenotools_open_libvulkan(RTLD_NOW,
-                                               ADRENOTOOLS_DRIVER_CUSTOM,
-                                               nullptr,
-                                               native_lib_dir.c_str(),
-                                               driver_dir,
-                                               driver_name,
-                                               nullptr,
-                                               nullptr);
-  __android_log_print(ANDROID_LOG_INFO,
-                      "blender-turnip",
-                      "hooks=%s driver=%s%s -> %p",
-                      native_lib_dir.c_str(),
-                      driver_dir,
-                      driver_name,
-                      libvulkan);
-  if (libvulkan == nullptr) {
-    return false;
-  }
-  PFN_vkGetInstanceProcAddr get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-      dlsym(libvulkan, "vkGetInstanceProcAddr"));
-  if (get_instance_proc_addr == nullptr) {
-    __android_log_print(ANDROID_LOG_ERROR, "blender-turnip", "no vkGetInstanceProcAddr in driver");
-    return false;
-  }
-  volkInitializeCustom(get_instance_proc_addr);
-  __android_log_print(ANDROID_LOG_INFO, "blender-turnip", "loaded %s", driver_name);
-  return true;
-}
-#endif
 
 static bool vk_instance_create_for_platform_checks(VkInstance *r_instance)
 {
-#ifndef __ANDROID__
-  /* These are desktop loader variables. Android resolves layers through its own loader and
-   * the GraphicsEnvironment injection used to attach validation, which this would suppress. */
   vk_restrict_loader_layers();
-#endif
 
-#ifdef WITH_ADRENOTOOLS
-  /* Optionally replace the vendor driver with Mesa Turnip, which supports dynamic rendering and
-   * avoids the render-pass fallback. Enable with `setprop debug.blender.turnip 1`. */
-  if (!android_try_load_turnip()) {
-    VkResult volk_result = volkInitialize();
-    if (volk_result != VK_SUCCESS) {
-      CLOG_ERROR(&LOG, "Error initializing Vulkan loader: VkResult=%d", volk_result);
-      return false;
-    }
-  }
-  VkResult vk_result = VK_SUCCESS;
-#else
   VkResult vk_result = volkInitialize();
-#endif
   if (vk_result != VK_SUCCESS) {
     CLOG_ERROR(&LOG,
                "Error initializing Vulkan loader: VkResult=%d, most likely cannot find the Vulkan "
@@ -367,16 +237,22 @@ static bool vk_instance_create_for_platform_checks(VkInstance *r_instance)
     return false;
   }
 
-  /* Initialize an vulkan 1.2 instance. */
+  /* Initialize an vulkan 1.1 instance. */
   VkApplicationInfo vk_application_info = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
   vk_application_info.pApplicationName = "Blender";
   vk_application_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
   vk_application_info.pEngineName = "Blender";
   vk_application_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-  vk_application_info.apiVersion = VK_API_VERSION_1_2;
+  vk_application_info.apiVersion = VK_API_VERSION_1_1;
+
+  const char *vk_instance_extensions[] = {
+      VK_KHR_SURFACE_EXTENSION_NAME, /* Required dependency for VK_KHR_swapchain. */
+  };
 
   VkInstanceCreateInfo vk_instance_info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
   vk_instance_info.pApplicationInfo = &vk_application_info;
+  vk_instance_info.ppEnabledExtensionNames = vk_instance_extensions;
+  vk_instance_info.enabledExtensionCount = 1;
 
   *r_instance = VK_NULL_HANDLE;
   vkCreateInstance(&vk_instance_info, nullptr, r_instance);
@@ -390,7 +266,7 @@ bool VKBackend::is_supported()
 
   VkInstance vk_instance = VK_NULL_HANDLE;
   if (!vk_instance_create_for_platform_checks(&vk_instance)) {
-    CLOG_WARN(&LOG, "Unable to initialize a Vulkan 1.2 instance.");
+    CLOG_WARN(&LOG, "Unable to initialize a Vulkan 1.1 instance.");
     return false;
   }
   volkLoadInstanceOnly(vk_instance);
@@ -497,7 +373,7 @@ void VKBackend::supported_devices_print(FILE *fp)
   size_t w_id = strlen(col_id);
   for (const Row &row : rows) {
     char buf[16];
-    w_index = std::max(w_index, BLI_snprintf_rlen(buf, sizeof(buf), "%d", row.index));
+    w_index = std::max(w_index, SNPRINTF_RLEN(buf, "%d", row.index));
     w_id = std::max(w_id, row.identifier.size());
   }
 
@@ -633,19 +509,23 @@ void VKBackend::detect_workarounds(VKDevice &device)
 
     /* Force workarounds and disable extensions. */
     workarounds.not_aligned_pixel_formats = true;
-    extensions.shader_output_layer = false;
-    extensions.shader_output_viewport_index = false;
+    workarounds.static_viewport_scissor = true;
+    extensions.shader_viewport_index_layer = false;
     extensions.fragment_shader_barycentric = false;
-    extensions.dynamic_rendering = true;
     extensions.dynamic_rendering_local_read = false;
     extensions.dynamic_rendering_unused_attachments = false;
     extensions.pageable_device_local_memory = false;
     extensions.wide_lines = false;
     extensions.line_rasterization = false;
     extensions.extended_dynamic_state = false;
+    extensions.multi_draw_indirect = false;
+    extensions.provoking_vertex = false;
+    extensions.spirv_1_4 = false;
     GCaps.ray_query_support = false;
     GCaps.stencil_export_support = false;
     GCaps.texture_pool_workaround = true;
+    GCaps.vertex_pipeline_stores_and_atomics_support = false;
+    GCaps.multi_viewport_support = false;
 
     device.workarounds_ = workarounds;
     device.extensions_ = extensions;
@@ -656,35 +536,23 @@ void VKBackend::detect_workarounds(VKDevice &device)
     GCaps.texture_pool_workaround = true;
   }
 
-  extensions.shader_output_layer =
-      device.physical_device_vulkan_12_features_get().shaderOutputLayer;
-  extensions.shader_output_viewport_index =
-      device.physical_device_vulkan_12_features_get().shaderOutputViewportIndex;
+  /* Some Qualcomm drivers keep command-buffer-local state written by `vkCmdSetViewport` across
+   * command buffer resets. */
+  if (GPU_type_matches(GPU_DEVICE_QUALCOMM, GPU_OS_ANY, GPU_DRIVER_ANY)) {
+    workarounds.static_viewport_scissor = true;
+  }
+
+  extensions.shader_viewport_index_layer = device.supports_extension(
+      VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+  extensions.spirv_1_4 = device.supports_extension(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
   extensions.wide_lines = device.physical_device_features_get().wideLines;
-  extensions.multi_viewport = device.physical_device_features_get().multiViewport;
   extensions.fragment_shader_barycentric = device.supports_extension(
       VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
-  /* Core in Vulkan 1.3, and a driver that has it in core no longer advertises the
-   * extension, so testing only for the extension turned it off on the devices that
-   * support it best. Vulkan 1.1 mobile GPUs (Adreno 642L) have neither and keep
-   * using the render-pass fallback. Must stay in lock-step with the feature
-   * GHOST_ContextVK actually enables at device creation. */
-  extensions.dynamic_rendering =
-      device.supports_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) ||
-      device.physical_device_properties_get().apiVersion >= VK_API_VERSION_1_3;
-  /* The feature has to be enabled on the device, which being core in Vulkan 1.2 or having the
-   * extension present does not imply. Read back what was actually enabled. */
-  extensions.separate_depth_stencil_layouts =
-      device.physical_device_vulkan_12_features_get().separateDepthStencilLayouts;
-  extensions.dynamic_rendering_local_read =
-      extensions.dynamic_rendering &&
-      device.supports_extension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
-  extensions.dynamic_rendering_unused_attachments =
-      extensions.dynamic_rendering &&
-      device.supports_extension(VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME);
-  extensions.logic_ops = device.physical_device_features_get().logicOp;
-  extensions.provoking_vertex = device.supports_extension(
-      VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
+  extensions.dynamic_rendering_local_read = device.supports_extension(
+      VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
+  extensions.dynamic_rendering_unused_attachments = device.supports_extension(
+      VK_EXT_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_EXTENSION_NAME);
+
   extensions.maintenance4 = device.supports_extension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
   extensions.memory_priority = device.supports_extension(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
   extensions.pageable_device_local_memory = device.supports_extension(
@@ -697,6 +565,9 @@ void VKBackend::detect_workarounds(VKDevice &device)
       VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
   extensions.vertex_input_dynamic_state = device.supports_extension(
       VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+  extensions.multi_draw_indirect = device.physical_device_features_get().multiDrawIndirect ==
+                                   VK_TRUE;
+  extensions.provoking_vertex = device.supports_extension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME);
 #if 0
   extensions.host_image_copy = device.supports_extension(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME);
 #endif
@@ -716,6 +587,9 @@ void VKBackend::detect_workarounds(VKDevice &device)
     workarounds.not_aligned_pixel_formats = true;
   }
 
+  extensions.shader_clip_distance = device.physical_device_features_get().shaderClipDistance ==
+                                    VK_TRUE;
+
   /* During testing graphics pipeline library feature it was detected that it would crash on
    * official AMD drivers.
    */
@@ -725,22 +599,6 @@ void VKBackend::detect_workarounds(VKDevice &device)
     extensions.graphics_pipeline_library = false;
     extensions.vertex_input_dynamic_state = false;
   }
-
-  /* The library build paths always describe their attachments through the dynamic rendering
-   * pNext chain and leave renderPass null, which is only valid with dynamicRendering enabled.
-   * Only the monolithic path substitutes a compatible render pass, so restrict pipeline
-   * libraries to devices that have dynamic rendering. */
-  if (!extensions.dynamic_rendering) {
-    extensions.graphics_pipeline_library = false;
-  }
-
-#ifdef __ANDROID__
-  /* Qualcomm's Android Vulkan driver can advertise graphics pipeline libraries, but fail while
-   * compiling/linking Blender's first UI pipelines. The failed pipelines leave the swap-chain
-   * presenting an otherwise healthy black frame. Prefer the spec-compatible monolithic pipeline
-   * path on Android until the affected driver versions can be identified reliably. */
-  extensions.graphics_pipeline_library = false;
-#endif
 
   /* Disable vertex input dynamic state for Qualcomm devices (#153414).
    *
@@ -784,26 +642,16 @@ void VKBackend::detect_workarounds(VKDevice &device)
     GPUIntelGpuArch gpu_arch = GPU_platform_get_intel_arch(
         device.physical_device_properties_get().deviceID);
 
-    /* Intel Gen9 iGPUs (Intel 7th to 10th Gen Processor Graphics driver) show a black screen at
-     * application startup when using VK_EXT_vertex_input_dynamic_state.
-     *
-     * See #147721
-     */
     if (gpu_arch == GPUIntelGpuArch::Gen9AndOlder) {
+      /* Intel Gen9 iGPUs (Intel 7th to 10th Gen Processor Graphics driver) show a black screen at
+       * application startup when using VK_EXT_vertex_input_dynamic_state.
+       *
+       * See #147721
+       */
       extensions.vertex_input_dynamic_state = false;
-    }
 
-    /* Using the texture pool causes varying issues on older Intel iGPUs.
-     * Note: Gen12 iGPUs are partly covered by the Intel 11th to 14th Gen Processor Graphics driver
-     * and the Intel Arc Graphics driver (the latter handles Arrow Lake and Meteor Lake).
-     * - Visual corruptions can be seen on Gen9 and older iGPUs (Intel 7th to 10th Gen Processor
-     * Graphics driver; #147721).
-     * - When using the image cache, visual artifacts can be seen on Gen11 and Gen12 iGPUs
-     * (#156496) and Gen12 dGPUs (#160002).
-     * - When using the texture pool without the image cache, memory leaks happen on Gen11 and
-     * Gen12 GPUs (#157777).
-     */
-    if (gpu_arch <= GPUIntelGpuArch::Gen12) {
+      /* Using the texture pool causes visual corruptions on Gen9 and older iGPUs (Intel 7th to
+       * 10th Gen Processor Graphics driver; #147721). */
       GCaps.texture_pool_workaround = true;
     }
   }
@@ -837,97 +685,22 @@ void VKBackend::delete_resources()
   MEM_delete(compiler_);
 }
 
-/**
- * Is this dispatch missing its compute pipeline?
- *
- * `vkCreateComputePipelines` can fail for a shader that is perfectly valid — Qualcomm's Adreno
- * driver answers VK_ERROR_UNKNOWN for a handful of them (see the retries in vk_pipeline_pool.cc)
- * — and the failure only reaches this point as a null pipeline handle.
- *
- * Recording it anyway is not an option: `pipeline` in vkCmdBindPipeline is a
- * non-optional parameter, so VK_NULL_HANDLE is invalid usage. In practice the driver then faults
- * the GPU context, the fence for that submission is never signalled, and the thread waiting on it
- * blocks forever. On Android that is fatal in a way it is not on the desktop: the window manager
- * kills an application that has not answered input for 10 seconds, so one refused pipeline takes
- * the whole process down with an ANR and no crash log to explain it.
- *
- * Skipping the dispatch keeps the frame moving. The pass produces nothing, which is the correct
- * meaning of a shader that could not be created, and lets the caller's fallback (CPU subdivision,
- * for instance) or a degraded render take over instead of a hang.
- */
-static void vk_dispatch_report_skipped(const char *name, const char *reason)
+bool VKBackend::pipelines_compiled_since_last_reset()
 {
-  /* Report each shader once. This is reached from the draw loop, so warning every time would
-   * repeat for every frame and bury the rest of the log. */
-  static std::mutex mutex;
-  static std::set<std::string> reported;
-  bool is_new = false;
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    is_new = reported.insert(name).second;
-  }
-  if (is_new) {
-    CLOG_WARN(&LOG,
-              "Skipping compute dispatch for `%s`: %s. Whatever this pass would have written "
-              "keeps its previous contents.",
-              name,
-              reason);
-  }
+  return device.pipelines.compiled_since_last_reset();
 }
 
-/**
- * Is there no shader bound to dispatch?
- *
- * A shader that failed to build leaves callers holding a null pointer, and not all of them check
- * it before asking for a dispatch. This has to be tested before the pipeline data is collected,
- * because gathering it dereferences the bound shader and would fault first.
- */
-static bool vk_dispatch_shader_missing(const VKContext &context)
+void VKBackend::reset_pipeline_compilation_tracking()
 {
-  if (context.shader != nullptr) {
-    return false;
-  }
-  vk_dispatch_report_skipped("<no shader bound>", "no shader is bound");
-  return true;
-}
-
-/**
- * Did the driver refuse to build the pipeline for the bound shader?
- *
- * `vkCreateComputePipelines` can fail for a shader that is perfectly valid — Qualcomm's Adreno
- * driver answers VK_ERROR_UNKNOWN for a handful of them (see the retries in vk_pipeline_pool.cc)
- * — and the failure only reaches this point as a null pipeline handle.
- *
- * Recording it anyway is not an option: `pipeline` in vkCmdBindPipeline is a non-optional
- * parameter, so VK_NULL_HANDLE is invalid usage. In practice the driver then faults the GPU
- * context, the fence for that submission is never signalled, and the thread waiting on it blocks
- * forever. On Android that is fatal in a way it is not on the desktop: the window manager kills an
- * application that has not answered input for 10 seconds, so one refused pipeline takes the whole
- * process down with an ANR and no crash log to explain it.
- */
-static bool vk_dispatch_pipeline_missing(const render_graph::VKPipelineData &pipeline_data,
-                                         const VKContext &context)
-{
-  if (pipeline_data.vk_pipeline != VK_NULL_HANDLE) {
-    return false;
-  }
-  vk_dispatch_report_skipped(unwrap(*context.shader).name_get().c_str(),
-                             "the driver did not create its pipeline");
-  return true;
+  device.pipelines.reset_compilation_tracking();
 }
 
 void VKBackend::compute_dispatch(int groups_x_len, int groups_y_len, int groups_z_len)
 {
   VKContext &context = *VKContext::get();
-  if (vk_dispatch_shader_missing(context)) {
-    return;
-  }
   render_graph::VKResourceAccessInfo &resources = context.reset_and_get_access_info();
   render_graph::VKDispatchNode::CreateInfo dispatch_info(resources);
   context.update_pipeline_data(dispatch_info.dispatch_node.pipeline_data);
-  if (vk_dispatch_pipeline_missing(dispatch_info.dispatch_node.pipeline_data, context)) {
-    return;
-  }
   dispatch_info.dispatch_node.group_count_x = groups_x_len;
   dispatch_info.dispatch_node.group_count_y = groups_y_len;
   dispatch_info.dispatch_node.group_count_z = groups_z_len;
@@ -938,18 +711,10 @@ void VKBackend::compute_dispatch_indirect(StorageBuf *indirect_buf)
 {
   BLI_assert(indirect_buf);
   VKContext &context = *VKContext::get();
-  if (vk_dispatch_shader_missing(context)) {
-    return;
-  }
   VKStorageBuffer &indirect_buffer = *unwrap(indirect_buf);
   render_graph::VKResourceAccessInfo &resources = context.reset_and_get_access_info();
   render_graph::VKDispatchIndirectNode::CreateInfo dispatch_indirect_info(resources);
   context.update_pipeline_data(dispatch_indirect_info.dispatch_indirect_node.pipeline_data);
-  if (vk_dispatch_pipeline_missing(dispatch_indirect_info.dispatch_indirect_node.pipeline_data,
-                                   context))
-  {
-    return;
-  }
   dispatch_indirect_info.dispatch_indirect_node.buffer = indirect_buffer.resource();
   dispatch_indirect_info.dispatch_indirect_node.offset = 0;
   context.render_graph().add_node(dispatch_indirect_info);
@@ -983,6 +748,11 @@ Batch *VKBackend::batch_alloc()
 Fence *VKBackend::fence_alloc()
 {
   return new VKFence();
+}
+
+WorkInFlight *VKBackend::work_in_flight_alloc(uint max_in_flight)
+{
+  return new VKWorkInFlight(max_in_flight);
 }
 
 FrameBuffer *VKBackend::framebuffer_alloc(const char *name)
@@ -1102,11 +872,18 @@ void VKBackend::capabilities_init(VKDevice &device)
   GCaps.geometry_shader_support = true;
   GCaps.stencil_export_support = device.supports_extension(
       VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+  GCaps.vertex_pipeline_stores_and_atomics_support =
+      device.physical_device_features_get().vertexPipelineStoresAndAtomics;
   GCaps.ray_query_support =
       device.supports_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
       device.physical_device_acceleration_structure_properties_get().maxGeometryCount > 0 &&
       device.physical_device_acceleration_structure_properties_get().maxPrimitiveCount > 0 &&
       device.physical_device_acceleration_structure_properties_get().maxInstanceCount > 0;
+
+  GCaps.multi_viewport_support = device.physical_device_features_get().multiViewport &&
+                                 limits.maxViewports >= GPU_MAX_VIEWPORTS;
+
+  GCaps.srgb_write_view_support = true;
 
   GCaps.max_texture_size = max_ii(limits.maxImageDimension1D, limits.maxImageDimension2D);
   GCaps.max_texture_3d_size = min_uu(limits.maxImageDimension3D, INT_MAX);

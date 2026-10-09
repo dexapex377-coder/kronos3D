@@ -910,26 +910,6 @@ endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config/Audaspace.h.in ${CMAKE_CURRENT_BINARY_DIR}/Audaspace.h ESCAPE_QUOTES @ONLY)
 
-# AAudio
-# Touch: added by the Blender for Android fork. Audaspace has a device for every desktop audio API
-# and none for Android, so audio was compiled in with nowhere to send it. AAudio is part of the
-# platform -- header and libaaudio.so both come from the NDK sysroot -- so there is nothing to find
-# and nothing to build, which is why this needs no find_package and no option: on Android it is
-# always the right answer, and off Android the file is never compiled.
-if(ANDROID)
-	set(AAUDIO_SRC
-		plugins/aaudio/AAudioDevice.cpp
-	)
-	set(AAUDIO_HDR
-		plugins/aaudio/AAudioDevice.h
-	)
-
-	list(APPEND LIBRARIES aaudio)
-	list(APPEND SRC ${AAUDIO_SRC})
-	list(APPEND HDR ${AAUDIO_HDR})
-	list(APPEND STATIC_PLUGINS AAudioDevice)
-endif()
-
 list(APPEND HDR ${CMAKE_CURRENT_BINARY_DIR}/Audaspace.h)
 
 set(STATIC_PLUGIN_CLASSES "")

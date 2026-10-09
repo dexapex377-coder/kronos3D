@@ -27,6 +27,9 @@
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
 #include "UI_resources.hh"
+
+#include "buttons/interface_label_markdown.hh"
+
 struct IconTextOverlay;
 namespace blender {
 
@@ -60,7 +63,7 @@ struct SafetyRect;
 struct HandleButtonData;
 struct Layout;
 struct UndoStack_Text;
-/* ****************** general defines ************** */
+/* General defines. */
 
 #define RNA_ENUM_VALUE -2
 
@@ -71,16 +74,7 @@ struct UndoStack_Text;
 #define UI_MENU_SUBMENU_PADDING (6 * UI_SCALE_FAC)
 
 /* menu scrolling */
-#ifdef __ANDROID__
-/* Touch: the band at the top and bottom of an over-long menu. With a mouse it only has to be
- * big enough to hover over, and it auto-scrolls on its own from there. A finger has to hit it
- * deliberately and cannot hover at all, so it is doubled and made to respond to a tap. It is
- * also what a drag has to start in front of, so a bigger band means fewer accidental item
- * presses at the very edge. See ANDROID_TOUCH_UI_SCALE_STUDY.md. */
-#  define UI_MENU_SCROLL_ARROW (24 * UI_SCALE_FAC)
-#else
-#  define UI_MENU_SCROLL_ARROW (12 * UI_SCALE_FAC)
-#endif
+#define UI_MENU_SCROLL_ARROW (12 * UI_SCALE_FAC)
 #define UI_MENU_SCROLL_MOUSE (UI_MENU_SCROLL_ARROW + 2 * UI_SCALE_FAC)
 #define UI_MENU_SCROLL_PAD (4 * UI_SCALE_FAC)
 
@@ -440,7 +434,7 @@ struct ButtonNumberSlider : public Button {
 
 /** Derived struct for #ButtonType::Color */
 struct ButtonColor : public Button {
-  bool is_pallete_color = false;
+  bool is_palette_color = false;
   int palette_color_index = -1;
 };
 
@@ -458,8 +452,7 @@ struct ButtonSearch : public Button {
   void *item_active = nullptr;
   char *item_active_str;
 
-  void *arg = nullptr;
-  FreeArgFunc arg_free_fn = nullptr;
+  std::shared_ptr<void> arg = nullptr;
 
   ButtonSearchContextMenuFn item_context_menu_fn = nullptr;
   ButtonSearchTooltipFn item_tooltip_fn = nullptr;
@@ -506,13 +499,19 @@ struct ButtonSeparatorLine : public Button {
   bool is_vertical;
 };
 
+enum class ButtonLabelType {
+  Standard,
+  Multiline,
+  Markdown,
+};
+
 /** Derived struct for #ButtonType::Label. */
 struct ButtonLabel : public Button {
   float alpha_factor = 1.0f;
   /** When the button draws an icon, also draw a mono-colored border for it. */
   bool draw_icon_border = false;
 
-  bool is_multiline = false;
+  ButtonLabelType label_type = ButtonLabelType::Standard;
   /**
    * Wrap cache from last layout pass.
    * This is also referenced in the button owning #Block so it can be looked up and reused in
@@ -520,6 +519,8 @@ struct ButtonLabel : public Button {
    * copied/moved around.
    */
   std::shared_ptr<TextWrapCache> wrap_cache;
+  /** Layout cache for markdown labels. */
+  std::shared_ptr<MarkdownLayoutCache> markdown_cache;
   /** Maximum lines to be drawn in multi-line labels, 0 means all. */
   int max_lines = 0;
   FontStyleAlign text_align = UI_STYLE_TEXT_LEFT;
@@ -698,6 +699,7 @@ struct Block {
 
   Vector<std::unique_ptr<Button>> buttons_ptrs;
   Vector<std::shared_ptr<TextWrapCache>> text_wrap_cache;
+  Vector<std::shared_ptr<MarkdownLayoutCache>> markdown_layout_cache;
 
   Panel *panel = nullptr;
   Block *oldblock = nullptr;
@@ -776,6 +778,9 @@ struct Block {
   bool tooltipdisabled = false;
   /** True when #block_end has been called. */
   bool endblock = false;
+  /** True when #block_end has been called with #postpone_callbacks set to true,
+   * #block_post_layout_callbacks_exec must be called. */
+  bool post_block_layout_fns_pending = false;
 
   /** for doing delayed */
   BlockBoundsCalc bounds_type = BLOCK_BOUNDS_NONE;
@@ -1070,13 +1075,6 @@ struct PopupBlockHandle {
    */
   bool can_refresh = false;
   bool refresh = false;
-  /**
-   * Touch: whether this popup is drawn at the menu scale (see #ED_ui_menu_scale). True for the
-   * menus, popovers and pies the setting exists for. Cleared by the splash and the About box,
-   * which are fixed-proportion artwork rather than something a finger aims at, and which run out
-   * of screen before they run out of scale.
-   */
-  bool use_menu_scale = true;
 
   wmTimer *scrolltimer = nullptr;
   float scrolloffset = 0.0f;
@@ -1089,6 +1087,8 @@ struct PopupBlockHandle {
   wmOperator *popup_op = nullptr;
   ScrArea *ctx_area = nullptr;
   ARegion *ctx_region = nullptr;
+  /** The popup region this popup was opened from (if any). */
+  ARegion *ctx_region_popup = nullptr;
 
   /* return values */
   int menuretval = 0;
@@ -1118,21 +1118,6 @@ struct PopupBlockHandle {
 
   bool mmb_panning = false;
   int mmb_panning_last_y = 0;
-
-  /* Touch: dragging an over-long menu or dialog with a finger.
-   *
-   * The mouse reaches a clipped popup two ways, and a finger has neither: it hovers the arrow
-   * band and the menu auto-scrolls on a timer, or it holds the middle button and pans. So a
-   * press inside a clipped popup arms this, a motion past the drag threshold turns it into a
-   * pan, and the release is swallowed so the item the finger ended over is not pressed. A press
-   * that never moves is left alone and activates the item as it always did.
-   * See ANDROID_TOUCH_UI_SCALE_STUDY.md. */
-  bool touch_scroll_armed = false;
-  bool touch_scroll_panning = false;
-  int touch_scroll_start_y = 0;
-  int touch_scroll_last_y = 0;
-  /** 't', 'b' or 0: which arrow band the press landed in, for a tap that never becomes a drag. */
-  char touch_scroll_arrow = 0;
   /** Short period of time that prevents closing the current menu with ongoing actions like middle
    * mouse panning.  */
   wmTimer *keep_open_timer = nullptr;
@@ -1184,37 +1169,6 @@ ARegion *searchbox_create_menu(bContext *C, ARegion *butregion, ButtonSearch *se
  * x and y in screen-coords.
  */
 bool searchbox_inside(ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
-/**
- * Touch: whether the release that just arrived is the end of a drag, clearing the drag as it says
- * so.
- *
- * A release inside a search box exits the button, which is what picks the result under it. That is
- * right for a tap and wrong for the end of a scroll: a finger that has just dragged the list is
- * letting go of it, not choosing from it, and applying whatever it happened to stop over closes
- * the popup on the wrong answer.
- */
-bool searchbox_drag_consume_release(ARegion *region) ATTR_NONNULL(1);
-/**
- * Touch: a button has gone down inside the results, which is the only state a drag may begin from.
- *
- * The press and the release both reach the button rather than the search region, so the region is
- * told about them. Without the press to arm it, the only thing left to ask is which button was
- * pressed last -- and that names the last press there ever was, so after any click a mouse merely
- * crossing the list, or a stylus merely hovering over it, scrolled as though it were dragging.
- */
-void searchbox_drag_press(ARegion *region) ATTR_NONNULL(1);
-/**
- * Touch: point the selection at the result under `xy`, for the release that is about to apply it.
- *
- * A click applies whatever is highlighted, and the highlight is normally kept under the pointer by
- * the motion that got there. A finger and a stylus arrive without that motion: they land on the
- * item and let go, so the highlight is still wherever the last arrow key or the opening default
- * left it, and the click applies that instead of what was touched. Arrow keys and Return keep
- * working the way they did -- for them the highlight *is* the choice.
- *
- * Returns whether a result was actually under the point.
- */
-bool searchbox_select_at(ARegion *region, const int xy[2]) ATTR_NONNULL(1, 2);
 int searchbox_find_index(ARegion *region, const char *name);
 /**
  * Region is the search box itself.
@@ -1252,8 +1206,7 @@ PopupBlockHandle *popup_block_create(bContext *C,
                                      BlockHandleCreateFunc handle_create_func,
                                      void *arg,
                                      FreeArgFunc arg_free,
-                                     bool can_refresh,
-                                     bool use_menu_scale = true);
+                                     bool can_refresh);
 /**
  * \param can_refresh: Allow menus to re-run their layout definitions using
  *    `ED_region_tag_refresh_ui()`. This can be used to update the grayed out state of items or the
@@ -1468,7 +1421,7 @@ Button *button_find_new(Block *block_new, const Button *but_old);
 int button_text_padding(const Button *but);
 
 #ifdef WITH_INPUT_IME
-void button_ime_reposition(Button *but, int x, int y, bool complete);
+void button_ime_reposition(Button *but, int x, int y);
 const wmIMEData *button_ime_data_get(Button *but);
 #endif
 
@@ -1694,6 +1647,10 @@ void button_anim_autokey(bContext *C, Button *but, Scene *scene, float cfra);
 
 void button_anim_decorate_cb(bContext *C, void *arg_but, void *arg_dummy);
 void button_anim_decorate_update_from_flag(ButtonDecorator *but);
+/**
+ * \return True when the decorated button should be considered "pushed".
+ */
+bool button_anim_decorate_pushed_state(ButtonDecorator *but);
 
 /* `interface_query.cc` */
 
@@ -1710,14 +1667,6 @@ bool button_is_interactive(const Button *but, bool labeledit) ATTR_WARN_UNUSED_R
 bool button_is_popover_once_compat(const Button *but) ATTR_WARN_UNUSED_RESULT;
 bool button_has_array_value(const Button *but) ATTR_WARN_UNUSED_RESULT;
 int button_icon(const Button *but);
-/**
- * Is this button's pull-down open right now?
- *
- * The state lives on #HandleButtonData, which is private to `interface_handlers.cc`, so this is
- * the only way anything else can ask. Added for the collapsed top bar menu, whose icon has to
- * say whether it is open -- a Python layout builds its icon once and cannot see this.
- */
-bool ui_but_menu_is_open(const Button *but);
 void button_pie_dir(RadialDirection dir, float vec[2]);
 
 bool button_is_cursor_warp(const Button *but) ATTR_WARN_UNUSED_RESULT;
@@ -1801,7 +1750,7 @@ bool popup_context_menu_for_button(bContext *C, Button *but, const wmEvent *even
 /**
  * menu to show when right clicking on the panel header
  */
-void popup_context_menu_for_panel(bContext *C, ARegion *region, Panel *panel);
+int popup_context_menu_for_panel(bContext *C, ARegion *region, Panel *panel);
 
 /* `eyedroppers/interface_eyedropper.cc` */
 
@@ -1953,6 +1902,8 @@ int paste_property_drivers(Span<FCurve *> src_drivers,
                            PropertyRNA *dst_prop);
 
 }  // namespace internal
+void panel_region_width_set(ARegion *region, const float aspect, int unscaled_size);
+void region_panels_sort_for_search_filter_visibility_change(bContext *C, const ARegion *region);
 
 }  // namespace ui
 }  // namespace blender

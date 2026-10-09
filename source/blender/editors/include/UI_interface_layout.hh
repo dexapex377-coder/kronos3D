@@ -2,6 +2,10 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/** \file
+ * \ingroup editorui
+ */
+
 #pragma once
 
 #include <functional>
@@ -113,6 +117,9 @@ enum class EnumTabExpand {
 };
 
 struct Layout : public Item, NonCopyable, NonMovable {
+
+  static constexpr float PROPERTY_SPLIT_FACTOR = 0.4f;
+
  protected:
   LayoutRoot *root_ = nullptr;
   bContextStore *context_ = nullptr;
@@ -413,6 +420,12 @@ struct Layout : public Item, NonCopyable, NonMovable {
                        int max_lines = 0);
 
   /**
+   * Renders the given text rendered as markdown. Only a subset of markdown is supported:
+   * Bold, italic, code, links, lists, headers, quotes, horizontal rules.
+   */
+  void label_markdown(StringRef text);
+
+  /**
    * Adds link item, displays a url that can be clicked in the layout.
    */
   void link(StringRef url, StringRef name, int icon);
@@ -471,8 +484,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
    * Adds a operator item, places a button in the layout to call the operator.
    * \param opname: Operator id name.
    * \param name: Text to show in the layout.
-   * \returns Operator pointer to write properties, might be #PointerRNA_NULL if operator does not
-   * exists.
+   * \returns Operator pointer to write properties, might be null if operator does not exists.
    */
   PointerRNA op(StringRefNull opname, std::optional<StringRef> name, int icon);
 
@@ -481,8 +493,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
    * \param opname: Operator id name.
    * \param name: Text to show in the layout.
    * \param context: Operator call context for #WM_operator_name_call.
-   * \returns Operator pointer to write properties, might be #PointerRNA_NULL if operator does not
-   * exists.
+   * \returns Operator pointer to write properties, might be null if operator does not exists.
    */
   PointerRNA op(StringRefNull opname,
                 std::optional<StringRef> name,
@@ -527,7 +538,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
   /**
    * Adds a #op_enum menu.
    * \returns Operator pointer to write extra properties to set when menu buttons are
-   * displayed, might be #PointerRNA_NULL if operator does not exist.
+   * displayed, might be null if operator does not exist.
    */
   PointerRNA op_menu_enum(const bContext *C,
                           wmOperatorType *ot,
@@ -537,7 +548,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
   /**
    * Adds a #op_enum menu.
    * \returns Operator pointer to write extra properties to set when menu buttons are
-   * displayed, might be #PointerRNA_NULL if operator does not exist.
+   * displayed, might be null if operator does not exist.
    */
   PointerRNA op_menu_enum(const bContext *C,
                           StringRefNull opname,
@@ -551,8 +562,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
    * \param name: Text to show in the layout.
    * \param context: Operator call context for #WM_operator_name_call.
    * \param menu_id: menu to show on held down.
-   * \returns Operator pointer to write properties, might be #PointerRNA_NULL if operator does not
-   * exists.
+   * \returns Operator pointer to write properties, might be null if operator does not exists.
    */
   PointerRNA op_menu_hold(wmOperatorType *ot,
                           std::optional<StringRef> name,
@@ -672,6 +682,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
   void textbox(const bContext *C,
                PointerRNA *ptr,
                StringRefNull propname,
+               std::optional<StringRefNull> name_opt = std::nullopt,
                std::optional<StringRefNull> placeholder = std::nullopt,
                const int initial_visible_lines = 3);
   /**
@@ -681,6 +692,7 @@ struct Layout : public Item, NonCopyable, NonMovable {
   void textbox_with_state(PointerRNA *ptr,
                           StringRefNull propname,
                           TextboxState *textbox_state,
+                          std::optional<StringRefNull> name_opt = std::nullopt,
                           std::optional<StringRefNull> placeholder = std::nullopt);
 
   /**
@@ -947,6 +959,12 @@ enum eUI_Item_Flag : uint32_t {
   ITEM_R_TEXT_BUT_FORCE_SEMI_MODAL_ACTIVE = 1 << 15,
   /** Text buttons with no emboss styled like labels. */
   ITEM_R_TEXT_BUT_LABEL_STYLE = 1 << 16,
+
+  /**
+   * Do not automatically add the button to call an operator to open the file-browser, for
+   * filepath/dirpath sub-types of string properties.
+   */
+  ITEM_R_PATH_NO_OPEN_BUTTON = 1 << 17,
 };
 ENUM_OPERATORS(eUI_Item_Flag)
 #define UI_ITEM_NONE ui::eUI_Item_Flag(0)

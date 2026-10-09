@@ -25,6 +25,7 @@ namespace blender {
 
 struct ARegion;
 struct AZone;
+enum AZEdge : int;
 struct Depsgraph;
 struct IDProperty;
 struct Main;
@@ -37,6 +38,7 @@ struct bContext;
 struct bScreen;
 struct rcti;
 struct wmKeyConfig;
+struct wmKeyMap;
 struct wmMsgSubscribeKey;
 struct wmMsgSubscribeValue;
 struct wmNotifier;
@@ -80,6 +82,14 @@ void ED_region_tag_redraw_partial(ARegion *region, const rcti *rct, bool rebuild
 void ED_region_tag_redraw_cursor(ARegion *region);
 void ED_region_tag_redraw_no_rebuild(ARegion *region);
 void ED_region_tag_refresh_ui(ARegion *region);
+/**
+ * Attempt to activate an button referencing an RNA property in the \a region, it may redraw the
+ * region so it can try one more time.
+ */
+void ED_region_activate_rna_prop(bContext *C,
+                                 ARegion *region,
+                                 const void *data,
+                                 StringRefNull prop_name);
 /**
  * Tag editor overlays to be redrawn. If in doubt about which parts need to be redrawn (partial
  * clipping rectangle set), redraw everything.
@@ -182,6 +192,12 @@ void ED_region_info_draw_multiline(ARegion *region,
 void ED_region_image_metadata_panel_draw(ImBuf *ibuf, ui::Layout *layout);
 void ED_region_grid_draw(ARegion *region, float zoomx, float zoomy, float x0, float y0);
 float ED_region_blend_alpha(ARegion *region);
+/**
+ * The region's on-screen rectangle, accounting for its current blend animation slide offset (see
+ * #ED_region_blend_alpha). Equal to `region->winrct` when the region isn't currently blending
+ * in/out.
+ */
+void ED_region_blend_rect(ARegion *region, rcti *r_rect);
 const rcti *ED_region_visible_rect(ARegion *region);
 /**
  * Overlapping regions only in the following restricted cases.
@@ -286,78 +302,6 @@ bool ED_area_is_global(const ScrArea *area);
  */
 int ED_region_global_size_y();
 void ED_area_update_region_sizes(wmWindowManager *wm, wmWindow *win, ScrArea *area);
-
-/* -------------------------------------------------------------------- */
-/** \name Menu scale
- *
- * Touch: a header button sized for a mouse is not sized for a thumb, and raising the Resolution
- * Scale until it is also shrinks the viewport, the node canvas and every other thing that needs
- * the pixels more. So the menu chrome carries its own multiplier on top of #UI_SCALE_FAC, applied
- * only while a chrome region lays itself out and draws.
- *
- * The whole mechanism is those two functions plus #ScopedMenuScale. Because every size in the
- * interface is derived from `U.scale_factor` and `U.widget_unit`, moving those two for the length
- * of a scope moves the widgets, the fonts, the icons and the layout spacing with them, without
- * any of the ~1800 call sites knowing about it. See ANDROID_TOUCH_UI_SCALE_STUDY.md.
- * \{ */
-
-/**
- * The multiplier menu chrome is drawn at, on top of #UI_SCALE_FAC. Derived from the "Menu Scale"
- * preference, which stores the extra fraction rather than the multiplier: this returns
- * `1.0 + UserDef::ui_scale_menu`. 1.0 disables the feature entirely, and is what every platform
- * other than Android starts on.
- */
-float ED_ui_menu_scale();
-/**
- * Does this region draw menu chrome (headers, navigation and tool bars, pop-ups) rather than
- * editor content? Content regions must not be scaled: the point is to spend no canvas at all.
- *
- * \param area: may be null. Needed because region type alone is not decisive: the top bar's tool
- * settings row is a #RGN_TYPE_WINDOW that draws a header, and is chrome because of the area it
- * is in rather than what it calls itself.
- */
-bool ED_region_uses_menu_scale(const ARegion *region, const ScrArea *area);
-
-/**
- * Multiplies the derived interface scale globals for the length of the scope, and puts them back
- * on the way out. Constructing with 1.0, or with a region that is not menu chrome, does nothing.
- *
- * Nesting is safe and does not compound: an inner guard sees that a scale is already applied and
- * declines. That matters because #ED_area_headersize() carries its own guard and is called from
- * inside the region rect pass, which carries one too.
- *
- * Restoring in a destructor is not a style preference: #ED_region_do_draw and #ED_region_do_layout
- * both return early on several paths, and a scale left applied leaks into whatever draws next.
- */
-class ScopedMenuScale {
- public:
-  /** Scale by an explicit factor. A factor of 1.0 is a no-op. */
-  explicit ScopedMenuScale(float factor);
-  /** Scale if \a region is menu chrome, otherwise do nothing. \a area may be null. */
-  ScopedMenuScale(const ARegion *region, const ScrArea *area);
-  ~ScopedMenuScale();
-
-  /**
-   * Put the scale back before the end of the scope. Idempotent, and the destructor calls it, so
-   * it is only needed where a scope has to end earlier than its braces do -- recursing into a
-   * sibling region that must choose its own scale, for one.
-   */
-  void reset();
-
-  ScopedMenuScale(const ScopedMenuScale &) = delete;
-  ScopedMenuScale &operator=(const ScopedMenuScale &) = delete;
-
- private:
-  void apply(float factor);
-
-  bool active_ = false;
-  int dpi_ = 0;
-  float scale_factor_ = 0.0f;
-  float inv_scale_factor_ = 0.0f;
-  short widget_unit_ = 0;
-};
-
-/** \} */
 bool ED_area_has_shared_border(ScrArea *a, ScrArea *b);
 ScrArea *ED_area_offscreen_create(wmWindow *win, eSpace_Type space_type);
 void ED_area_offscreen_free(wmWindowManager *wm, wmWindow *win, ScrArea *area);
@@ -379,12 +323,12 @@ ScrArea *ED_screen_areas_iter_next(const bScreen *screen, const ScrArea *area);
   for (ScrArea *area_name = ED_screen_areas_iter_first(win, screen); area_name != NULL; \
        area_name = ED_screen_areas_iter_next(screen, area_name))
 #define ED_screen_verts_iter(win, screen, vert_name) \
-  for (ScrVert *vert_name = (win)->global_areas.vertbase.first ? \
-                                (ScrVert *)(win)->global_areas.vertbase.first : \
-                                (ScrVert *)(screen)->vertbase.first; \
+  for (ScrVert *vert_name = (win)->global_areas.vertbase.first_ ? \
+                                (ScrVert *)(win)->global_areas.vertbase.first_ : \
+                                (ScrVert *)(screen)->vertbase.first_; \
        vert_name != NULL; \
-       vert_name = (vert_name == (win)->global_areas.vertbase.last) ? \
-                       (ScrVert *)(screen)->vertbase.first : \
+       vert_name = (vert_name == (win)->global_areas.vertbase.last()) ? \
+                       (ScrVert *)(screen)->vertbase.first_ : \
                        vert_name->next)
 
 /**
@@ -402,13 +346,6 @@ void ED_screens_init(bContext *C, Main *bmain, wmWindowManager *wm);
  * Only for edge lines between areas.
  */
 void ED_screen_draw_edges(wmWindow *win);
-/**
- * Move a press that landed near an editor border onto it, for input that cannot be precise.
- *
- * Returns true when  xy was moved. Only presses in the main region of an editor are considered,
- * so the widget strips that sit against a border keep every press aimed at them.
- */
-bool ED_screen_edge_snap_for_touch(wmWindow *win, int xy[2]);
 
 /**
  * Make this screen usable.
@@ -615,6 +552,16 @@ class WorkspaceStatus {
    *   [V] X-Ray
    */
   void opmodal(std::string text, const wmOperatorType *ot, int propvalue, bool inverted = false);
+
+  /**
+   * Add a dynamic status entry for a given property in a modal keymap.
+   * Example:
+   *   [V] X-Ray
+   */
+  void modal_keymap(std::string text,
+                    const wmKeyMap &keymap,
+                    int propvalue,
+                    bool inverted = false);
 };
 
 void ED_workspace_do_listen(bContext *C, const wmNotifier *note);

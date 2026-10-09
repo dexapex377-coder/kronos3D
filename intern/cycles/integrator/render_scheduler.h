@@ -164,6 +164,10 @@ class RenderScheduler {
    * requested for work to render the scheduler considers the work done. */
   int get_num_rendered_samples() const;
 
+  /* Get total number of samples rendered since the last scheduling reset, including all rendered
+   * samples across frames with an active real-time denoiser. */
+  int get_total_rendered_samples() const;
+
   /* Reset scheduler, indicating that rendering will happen from scratch.
    * Resets current rendered state, as well as scheduling information. */
   void reset(const BufferParams &buffer_params);
@@ -248,6 +252,9 @@ class RenderScheduler {
   /* Check whether denoising is active during interactive update while resolution divider is not
    * unit. */
   bool is_denoise_active_during_update() const;
+
+  /* Check whether a real-time denoiser like DLSS is active. */
+  bool is_denoiser_interactive() const;
 
   /* Heuristic which aims to give perceptually pleasant update of display interval in a way that at
    * lower samples and near the beginning of rendering, updates happen more often, but with higher
@@ -379,6 +386,8 @@ class RenderScheduler {
 
     /* Number of rendered samples on top of the start sample. */
     int num_rendered_samples = 0;
+    /* Total number of rendered samples since the last scheduling reset. */
+    int total_rendered_samples = 0;
 
     /* Point in time the latest PathTraceDisplay work has been scheduled. */
     double last_display_update_time = 0.0;

@@ -21,8 +21,6 @@
 #include "volk.h"
 
 #define VMA_VULKAN_VERSION 1002000  // Vulkan 1.2
-/* Function pointers come from volk, and VMA tests this with #if rather than #ifdef. */
-#define VMA_STATIC_VULKAN_FUNCTIONS 0
 #if !defined(_WIN32) or defined(_M_ARM64)
 /* Silence compilation warning on non-windows x64 systems. */
 #  define VMA_EXTERNAL_MEMORY_WIN32 0
@@ -124,6 +122,15 @@ VkImageUsageFlags to_vk_image_usage(const eGPUTextureUsage usage,
                                     const GPUTextureFormatFlag format_flag,
                                     bool use_image_host_copy);
 
+/**
+ * Test if these settings need EXTENDED_USAGE to be able to bind the
+ * texture as a (writable) storage image.
+ */
+bool vk_need_extended_usage_for_storage_image(const eGPUTextureUsage usage,
+                                              const GPUTextureFormatFlag format_flag);
+/** Other format to use for binding a storage image when the format itself is not supported. */
+VkFormat vk_extended_usage_storage_image_format(const VkFormat format);
+
 template<typename T> VkObjectType to_vk_object_type(T /*vk_obj*/)
 {
   const std::type_info &tid = typeid(T);
@@ -185,14 +192,6 @@ template<typename T> VkObjectType to_vk_object_type(T /*vk_obj*/)
 #undef VK_EQ_TYPEID
   return VK_OBJECT_TYPE_UNKNOWN;
 }
-
-/**
- * Collapse the depth-only/stencil-only layouts onto their combined equivalent.
- *
- * The separate layouts come from VK_KHR_separate_depth_stencil_layouts (core in Vulkan 1.2) and
- * don't exist on a Vulkan 1.1 device without it, where using them is undefined behaviour.
- */
-VkImageLayout vk_image_layout_supported(VkImageLayout layout);
 
 #define NOT_YET_IMPLEMENTED \
   printf("%s:%d `%s` not implemented yet\n", __FILE__, __LINE__, __func__);

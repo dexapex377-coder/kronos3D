@@ -13,10 +13,6 @@
 #include "BLI_math_vector_c.hh"
 #include "BLI_math_vector_types.hh"
 #include "BLI_rect.hh"
-#ifdef __ANDROID__
-#  include "BLI_time.hh"
-#  include <android/log.h>
-#endif
 
 #include "BKE_colortools.hh"
 
@@ -73,11 +69,13 @@ struct GPUViewport {
   gpu::Texture *depth_tx = nullptr;
   /** Compositing framebuffer for stereo viewport. */
   gpu::FrameBuffer *stereo_comp_fb = nullptr;
-  /** Color render and overlay frame-buffers for drawing outside of DRW module.
+  /**
+   * Color render and overlay frame-buffers for drawing outside of DRW module.
    * The render framebuffer is expected to be in the linear space and viewport will perform color
    * management on it to bring it to the display space.
    * The overlay frame-buffer is expected to be in the display space and viewport does not do any
-   * color management on it. */
+   * color management on it.
+   */
   gpu::FrameBuffer *render_fb = nullptr;
   gpu::FrameBuffer *overlay_fb = nullptr;
 
@@ -445,13 +443,6 @@ static void gpu_viewport_draw_colormanaged(GPUViewport *viewport,
                                            bool display_colorspace,
                                            bool do_overlay_merge)
 {
-#ifdef __ANDROID__
-  /* DOWNSTREAM (Android): time the full-window composite/color-managed blit. This runs at the
-   * window resolution after the engine renders, and is a fixed per-frame cost uncorrelated with
-   * viewport area. */
-  const double diag_t0 = BLI_time_now_seconds();
-#endif
-
   gpu::Texture *color = viewport->color_render_tx[view];
   gpu::Texture *color_overlay = viewport->color_overlay_tx[view];
 
@@ -494,16 +485,6 @@ static void gpu_viewport_draw_colormanaged(GPUViewport *viewport,
   if (use_ocio) {
     IMB_colormanagement_finish_glsl_draw();
   }
-
-#ifdef __ANDROID__
-  static int diag_composite_counter = 0;
-  if ((++diag_composite_counter % 30) == 0) {
-    __android_log_print(
-        ANDROID_LOG_INFO, "workbench_perf", "[composite] rect=%.0fx%.0f dt=%.2fms",
-        BLI_rctf_size_x(rect_pos), BLI_rctf_size_y(rect_pos),
-        (BLI_time_now_seconds() - diag_t0) * 1000.0);
-  }
-#endif
 }
 
 void GPU_viewport_draw_to_screen_ex(GPUViewport *viewport,

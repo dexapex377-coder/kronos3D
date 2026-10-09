@@ -20,7 +20,7 @@
 
 #pragma once
 
-#include "draw_shader_shared.hh"
+#include "draw_command_shared.hh"
 #include "eevee_shadow_page_ops.bsl.hh"
 
 namespace eevee::shadow {
@@ -47,12 +47,6 @@ void defrag([[resource_table]] PageAllocator &allocator,
   stats.statistics_buf.page_allocated_count = 0;
   stats.statistics_buf.page_rendered_count = 0;
   stats.statistics_buf.view_needed_count = 0;
-  stats.statistics_buf.diag_finalize_used = 0;
-  stats.statistics_buf.diag_finalize_update = 0;
-  stats.statistics_buf.diag_finalize_groups = 0;
-  allocator.pages_infos_buf._pad0 = 0;
-  allocator.pages_infos_buf._pad1 = 0;
-  allocator.pages_infos_buf._pad2 = 0;
 
   /* Reset clear command indirect buffer. */
   cmds.clear_dispatch_buf.num_groups_x = SHADOW_PAGE_RES / SHADOW_PAGE_CLEAR_GROUP_SIZE;

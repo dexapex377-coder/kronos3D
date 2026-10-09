@@ -11,68 +11,6 @@ from bpy.app.translations import (
 )
 
 
-def _topbar_is_upright(context):
-    """Touch: is the window taller than it is wide?
-
-    Only the scene and view layer fields still ask: the menu itself is folded in both
-    orientations now. Upright there is far less width to give those two fields, so that is where
-    they are squeezed. See ANDROID_TOUCH_UI_SCALE_STUDY.md.
-    """
-    window = context.window
-    return window is not None and window.height > window.width
-
-
-class TOPBAR_MT_touch_menu(Menu):
-    """Touch: the editor pull-downs and the workspaces, in one menu.
-
-    Folded in both orientations, not only upright. It started as the answer to a phone held
-    upright, where five pull-downs and eleven tabs had no chance of fitting -- but a tab strip
-    that shows three and a half of eleven, cut mid-word, is not much better, and one button that
-    always behaves the same way beats a bar that rearranges itself when the device turns.
-
-    The active workspace is drawn depressed, so the list is its own indicator and nothing is lost
-    by dropping the tabs.
-    """
-    bl_idname = "TOPBAR_MT_touch_menu"
-    bl_label = "Menu"
-
-    def draw(self, context):
-        layout = self.layout
-
-        layout.menu("TOPBAR_MT_file", icon='FILE')
-        layout.menu("TOPBAR_MT_edit", icon='GREASEPENCIL')
-        layout.menu("TOPBAR_MT_render", icon='RENDER_STILL')
-        layout.menu("TOPBAR_MT_window", icon='WINDOW')
-        layout.menu("TOPBAR_MT_help", icon='QUESTION')
-        # Last rather than first, unlike the desktop bar where it is the leftmost icon: splash,
-        # about, application templates and system information are the entries reached least, and
-        # putting them at the end keeps File and Edit under the thumb that just opened the menu.
-        layout.menu("TOPBAR_MT_blender", icon='BLENDER')
-
-        layout.separator()
-
-        # Sorted the way the tab strip is, which is the deliberate workflow order rather than
-        # the alphabetical one bpy.data is in. WorkSpace.order is what BKE_id_ordered_list()
-        # sorts the tabs by.
-        active = context.window.workspace
-        for workspace in sorted(bpy.data.workspaces, key=lambda ws: ws.order):
-            props = layout.operator(
-                "wm.context_set_id",
-                text=workspace.name,
-                translate=False,
-                depress=(workspace == active),
-            )
-            props.data_path = "window.workspace"
-            props.value = workspace.name
-
-        # The "+" at the end of the desktop tab strip, which folding the strip away took with it.
-        # The menu itself rather than workspace.add: the operator only exists to pop this menu up,
-        # so calling it from inside a menu would close this one to open that one, while a submenu
-        # nests the way every other entry here does.
-        layout.separator()
-        layout.menu("WORKSPACE_MT_add", text="Add Workspace", icon='ADD')
-
-
 class TOPBAR_HT_upper_bar(Header):
     bl_space_type = 'TOPBAR'
 
@@ -87,29 +25,17 @@ class TOPBAR_HT_upper_bar(Header):
     def draw_left(self, context):
         layout = self.layout
 
+        window = context.window
         screen = context.screen
 
-        # Touch: one button in place of the pull-downs and the tab strip both, in either
-        # orientation. The icon is swapped for KEY_MENU_FILLED while the menu is open, natively
-        # -- a Python layout cannot see that state. See ui_but_menu_is_open().
-        layout.menu("TOPBAR_MT_touch_menu", text="", icon='COLLAPSEMENU')
+        TOPBAR_MT_editor_menus.draw_collapsible(context, layout)
 
-        # Touch: undo and redo, which are the two things reached for most often and the two the
-        # keyboard is worst at here -- Ctrl+Z means opening the on-screen keyboard, holding a
-        # modifier and finding Z. The room the folded menu freed is worth spending on them.
-        # Both operators poll, so each greys out when there is nothing to undo or redo.
-        row = layout.row(align=True)
-        row.operator("ed.undo", text="", icon='LOOP_BACK')
-        row.operator("ed.redo", text="", icon='LOOP_FORWARDS')
+        layout.separator(type='LINE')
 
-        if screen.show_fullscreen:
-            # Touch: the label costs width the folded bar cannot spare upright, where this button
-            # shares the row with the menu and the two undo arrows. Turned with the device: wide
-            # enough and it says what it does again, which an arrow into a rectangle does not.
-            if _topbar_is_upright(context):
-                layout.operator("screen.back_to_previous", icon='SCREEN_BACK', text="")
-            else:
-                layout.operator("screen.back_to_previous", icon='SCREEN_BACK')
+        if not screen.show_fullscreen:
+            layout.template_ID_tabs(window, "workspace", new="workspace.add", menu="TOPBAR_MT_workspace_menu")
+        else:
+            layout.operator("screen.back_to_previous", icon='SCREEN_BACK', text="Back to Previous")
 
     def draw_right(self, context):
         layout = self.layout
@@ -123,25 +49,10 @@ class TOPBAR_HT_upper_bar(Header):
             layout.template_reports_banner()
             layout.template_running_jobs()
 
-        # Touch: the name fields sit at a four unit floor whatever the name is, and "Scene" and
-        # "ViewLayer" are far shorter than that. Upright those two floors are most of the width
-        # the rest of the bar needs, so both are held to a width that takes the difference out of
-        # the typable part and leaves the icons around them alone.
-        #
-        # Both rows get the same width, which is what makes the two fields read as a pair. Seven
-        # is the floor: the scene row carries a pin button the view layer row has no equivalent
-        # of, and at six it was the scene name that ran out of room and showed as "S...".
-        upright = _topbar_is_upright(context)
-
         # Active workspace view-layer is retrieved through window, not through workspace.
-        scene_row = layout.row(align=True)
-        if upright:
-            scene_row.ui_units_x = 7
-        scene_row.template_ID(window, "scene", new="scene.new", unlink="scene.delete")
+        layout.template_ID(window, "scene", new="scene.new", unlink="scene.delete")
 
         row = layout.row(align=True)
-        if upright:
-            row.ui_units_x = 7
         row.template_search(
             window, "view_layer",
             scene, "view_layers",
@@ -209,6 +120,9 @@ class TOPBAR_MT_editor_menus(Menu):
         layout.menu("TOPBAR_MT_edit")
 
         layout.menu("TOPBAR_MT_render")
+
+        if bpy.data.project:
+            layout.menu("TOPBAR_MT_project")
 
         layout.menu("TOPBAR_MT_window")
         layout.menu("TOPBAR_MT_help")
@@ -284,11 +198,12 @@ class TOPBAR_MT_file(Menu):
 
         layout.separator()
 
+        layout.menu("TOPBAR_MT_file_project", icon='PROJECT')
+
+        layout.separator()
+
         layout.menu("TOPBAR_MT_file_import", icon='IMPORT')
         layout.menu("TOPBAR_MT_file_export", icon='EXPORT')
-        row = layout.row()
-        row.operator("wm.collection_export_all")
-        row.enabled = context.view_layer.has_export_collections
 
         layout.separator()
 
@@ -423,6 +338,17 @@ class TOPBAR_MT_file_defaults(Menu):
             layout.operator("wm.read_factory_settings")
 
 
+class TOPBAR_MT_file_project(Menu):
+    bl_label = "Project"
+    bl_translation_context = i18n_contexts.editor_preferences
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("project.new_project", text="New Project...", icon='ADD')
+        layout.operator("project.open_blend_in_project", icon='FILE_FOLDER')
+
+
 # Include technical operators here which would otherwise have no way for users to access.
 class TOPBAR_MT_blender_system(Menu):
     bl_label = "System"
@@ -457,24 +383,37 @@ class TOPBAR_MT_file_import(Menu):
     bl_owner_use_filter = False
 
     def draw(self, _context):
+        FileHandler = bpy.types.FileHandler
         if bpy.app.build_options.alembic:
-            self.layout.operator("wm.alembic_import", text="Alembic (.abc)")
+            self.layout.operator(
+                "wm.alembic_import", text=FileHandler.label_with_extensions("IO_FH_alembic"))
         if bpy.app.build_options.usd:
             self.layout.operator(
-                "wm.usd_import", text="Universal Scene Description (.usd*)")
+                "wm.usd_import", text=FileHandler.label_with_extensions("IO_FH_usd"))
 
         if bpy.app.build_options.io_gpencil:
-            self.layout.operator("wm.grease_pencil_import_svg", text="SVG as Grease Pencil")
+            self.layout.operator(
+                "wm.grease_pencil_import_svg",
+                text=FileHandler.label_with_extensions("IO_FH_grease_pencil_svg"))
 
         if bpy.app.build_options.io_wavefront_obj:
-            self.layout.operator("wm.obj_import", text="Wavefront (.obj)")
+            self.layout.operator(
+                "wm.obj_import", text=FileHandler.label_with_extensions("IO_FH_obj"))
         if bpy.app.build_options.io_ply:
-            self.layout.operator("wm.ply_import", text="Stanford PLY (.ply)")
+            self.layout.operator(
+                "wm.ply_import", text=FileHandler.label_with_extensions("IO_FH_ply"))
+        if bpy.app.build_options.io_spz:
+            self.layout.operator("wm.spz_import", text=FileHandler.label_with_extensions("IO_FH_spz"))
         if bpy.app.build_options.io_stl:
-            self.layout.operator("wm.stl_import", text="STL (.stl)")
+            self.layout.operator(
+                "wm.stl_import", text=FileHandler.label_with_extensions("IO_FH_stl"))
 
         if bpy.app.build_options.io_fbx:
-            self.layout.operator("wm.fbx_import", text="FBX (.fbx)")
+            self.layout.operator(
+                "wm.fbx_import", text=FileHandler.label_with_extensions("IO_FH_fbx"))
+
+        if bpy.app.build_options.opentimelineio:
+            self.layout.operator("wm.otio_import", text="OpenTimelineIO (.otio)")
 
 
 class TOPBAR_MT_file_export(Menu):
@@ -482,12 +421,21 @@ class TOPBAR_MT_file_export(Menu):
     bl_label = "Export"
     bl_owner_use_filter = False
 
-    def draw(self, _context):
+    def draw(self, context):
+        FileHandler = bpy.types.FileHandler
+
+        row = self.layout.row()
+        row.operator("wm.collection_export_all")
+        row.enabled = context.view_layer.has_export_collections
+
+        self.layout.separator()
+
         if bpy.app.build_options.alembic:
-            self.layout.operator("wm.alembic_export", text="Alembic (.abc)")
+            self.layout.operator(
+                "wm.alembic_export", text=FileHandler.label_with_extensions("IO_FH_alembic"))
         if bpy.app.build_options.usd:
             self.layout.operator(
-                "wm.usd_export", text="Universal Scene Description (.usd*)")
+                "wm.usd_export", text=FileHandler.label_with_extensions("IO_FH_usd"))
 
         if bpy.app.build_options.io_gpencil:
             # PUGIXML library dependency.
@@ -498,11 +446,16 @@ class TOPBAR_MT_file_export(Menu):
                 self.layout.operator("wm.grease_pencil_export_pdf", text="Grease Pencil as PDF")
 
         if bpy.app.build_options.io_wavefront_obj:
-            self.layout.operator("wm.obj_export", text="Wavefront (.obj)")
+            self.layout.operator(
+                "wm.obj_export", text=FileHandler.label_with_extensions("IO_FH_obj"))
         if bpy.app.build_options.io_ply:
-            self.layout.operator("wm.ply_export", text="Stanford PLY (.ply)")
+            self.layout.operator(
+                "wm.ply_export", text=FileHandler.label_with_extensions("IO_FH_ply"))
         if bpy.app.build_options.io_stl:
-            self.layout.operator("wm.stl_export", text="STL (.stl)")
+            self.layout.operator(
+                "wm.stl_export", text=FileHandler.label_with_extensions("IO_FH_stl"))
+        if bpy.app.build_options.opentimelineio:
+            self.layout.operator("wm.otio_export", text="OpenTimelineIO (.otio)")
 
 
 class TOPBAR_MT_file_external_data(Menu):
@@ -639,7 +592,15 @@ class TOPBAR_MT_edit(Menu):
         layout.separator()
 
         layout.operator("screen.userpref_show", text="Preferences...", icon='PREFERENCES')
-        layout.operator("screen.project_setup_show", text="Project Setup...", icon='PROJECT')
+
+
+class TOPBAR_MT_project(Menu):
+    bl_label = "Project"
+
+    def draw(self, _context):
+        layout = self.layout
+
+        layout.operator("screen.project_settings_show", text="Settings...", icon='PREFERENCES')
 
 
 class TOPBAR_MT_window(Menu):
@@ -867,31 +828,12 @@ class TOPBAR_PT_name_marker(Panel):
     bl_ui_units_x = 14
 
     @staticmethod
-    def is_using_pose_markers(context):
-        sd = context.space_data
-        return (
-            sd.type == 'DOPESHEET_EDITOR' and sd.mode in {'ACTION', 'SHAPEKEY'} and
-            sd.show_pose_markers and context.active_action
-        )
-
-    @staticmethod
-    def is_using_sequencer(context):
-        sd = context.space_data
-        return sd.type == 'SEQUENCE_EDITOR'
-
-    @staticmethod
     def get_selected_marker(context):
-        if TOPBAR_PT_name_marker.is_using_pose_markers(context):
-            markers = context.active_action.pose_markers
-        elif TOPBAR_PT_name_marker.is_using_sequencer(context):
-            markers = context.sequencer_scene.timeline_markers
-        else:
-            markers = context.scene.timeline_markers
-
-        for marker in markers:
-            if marker.select:
-                return marker
-        return None
+        sd = context.space_data
+        if sd.type == 'SEQUENCE_EDITOR':
+            with context.temp_override(scene=context.sequencer_scene):
+                return context.selected_markers[0] if context.selected_markers else None
+        return context.selected_markers[0] if context.selected_markers else None
 
     @staticmethod
     def row_with_icon(layout, icon):
@@ -921,7 +863,7 @@ class TOPBAR_PT_name_marker(Panel):
         icon = 'TIME'
         if marker.camera is not None:
             icon = 'CAMERA_DATA'
-        elif self.is_using_pose_markers(context):
+        elif marker.id_data.id_type == 'ACTION':
             icon = 'ARMATURE_DATA'
         row = self.row_with_icon(layout, icon)
         row.prop(marker, "name", text="")
@@ -954,7 +896,6 @@ class TOPBAR_PT_grease_pencil_layers(Panel):
 
 classes = (
     TOPBAR_HT_upper_bar,
-    TOPBAR_MT_touch_menu,
     TOPBAR_MT_file_context_menu,
     TOPBAR_MT_workspace_menu,
     TOPBAR_MT_editor_menus,
@@ -964,6 +905,7 @@ classes = (
     TOPBAR_MT_file_new,
     TOPBAR_MT_file_recover,
     TOPBAR_MT_file_defaults,
+    TOPBAR_MT_file_project,
     TOPBAR_MT_templates_more,
     TOPBAR_MT_file_import,
     TOPBAR_MT_file_export,
@@ -972,6 +914,7 @@ classes = (
     TOPBAR_MT_file_previews,
     TOPBAR_MT_edit,
     TOPBAR_MT_render,
+    TOPBAR_MT_project,
     TOPBAR_MT_window,
     TOPBAR_MT_help,
     TOPBAR_PT_tool_fallback,

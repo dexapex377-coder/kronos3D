@@ -676,17 +676,6 @@ void popup_dummy_panel_set(ARegion *region, Block *block, StringRef idname)
 
 Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butregion, Button *but)
 {
-  /* Touch: every pull-down, popover, pie menu, search box and context menu is built here, and
-   * those are menu chrome by definition -- hence the explicit factor rather than asking about the
-   * region, whose margin below is already wanted at the menu scale. The exceptions opt out on the
-   * handle: see PopupBlockHandle::use_menu_scale.
-   *
-   * Guarded here rather than only in ED_region_do_layout() because popup_block_create() calls
-   * this directly the first time a menu opens, before the region has ever been laid out. Later
-   * refreshes arrive through the layout callback and find the scale already applied, which the
-   * guard declines to compound. */
-  const ScopedMenuScale menu_scale(handle->use_menu_scale ? ED_ui_menu_scale() : 1.0f);
-
   const int margin = UI_POPUP_MARGIN;
   wmWindow *window = CTX_wm_window(C);
   ARegion *region = handle->region;
@@ -695,7 +684,7 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
   const BlockHandleCreateFunc handle_create_func = handle->popup_create_vars.handle_create_func;
   void *arg = handle->popup_create_vars.arg;
 
-  Block *block_old = static_cast<Block *>(region->runtime->uiblocks.first);
+  Block *block_old = region->runtime->uiblocks.first();
 
   handle->refresh = (block_old != nullptr);
 
@@ -853,32 +842,6 @@ Block *popup_block_refresh(bContext *C, PopupBlockHandle *handle, ARegion *butre
       block_translate(block, 0, -unit_half);
     }
 
-    /* Touch: lift a search popup off the on-screen keyboard.
-     *
-     * The two are used together by definition -- the popup is a text field and the keyboard is
-     * what types into it -- and the popup spawns at the pointer, which on a phone is wherever the
-     * last touch landed. Tapping low on the screen put the results, and sometimes the field
-     * itself, underneath the keyboard.
-     *
-     * Moved rather than resized, and only as far as it has to go: the top is not allowed past the
-     * ceiling the clip below would enforce anyway, so a popup too tall for the room above the
-     * keyboard ends up against the top rather than pushed off it. Scoped to BLOCK_SEARCH_MENU,
-     * which is what the search popups set and nothing else does -- a pull-down that a finger can
-     * simply reopen somewhere else is not worth moving under the user. */
-    if (block->flag & BLOCK_SEARCH_MENU) {
-      rcti keyboard;
-      if (WM_virtual_keyboard_rect_get(window, &keyboard)) {
-        const int2 win_size = WM_window_native_pixel_size(window);
-        const float ceiling = float(win_size[1]) - UI_POPUP_MENU_TOP;
-        const float needed = float(keyboard.ymax) - block->rect.ymin;
-        const float room = ceiling - block->rect.ymax;
-        const float offset = min_ff(needed, room);
-        if (offset > 0.0f) {
-          block_translate(block, 0, offset);
-        }
-      }
-    }
-
     /* clip block with window boundary */
     popup_block_clip(window, block);
 
@@ -965,10 +928,15 @@ PopupBlockHandle *popup_block_create(bContext *C,
                                      BlockHandleCreateFunc handle_create_func,
                                      void *arg,
                                      FreeArgFunc arg_free,
-                                     const bool can_refresh,
-                                     const bool use_menu_scale)
+                                     const bool can_refresh)
 {
   wmWindow *window = CTX_wm_window(C);
+
+  /* Needed for the splash popup which may be called before the DPI is set, see #161001. */
+  if (window->runtime && window->runtime->ghostwin) {
+    WM_window_dpi_set_userdef(window);
+  }
+
   Button *activebut = context_active_but_get(C);
 
   /* disable tooltips from buttons below */
@@ -984,8 +952,8 @@ PopupBlockHandle *popup_block_create(bContext *C,
   /* store context for operator */
   handle->ctx_area = CTX_wm_area(C);
   handle->ctx_region = CTX_wm_region(C);
+  handle->ctx_region_popup = CTX_wm_region_popup(C);
   handle->can_refresh = can_refresh;
-  handle->use_menu_scale = use_menu_scale;
 
   /* store vars to refresh popup (RGN_REFRESH_UI) */
   handle->popup_create_vars.create_func = create_func;

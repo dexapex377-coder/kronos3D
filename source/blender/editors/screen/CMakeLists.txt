@@ -24,7 +24,6 @@ set(SRC
   screen_draw.cc
   screen_edit.cc
   screen_geometry.cc
-  screen_menu_scale.cc
   screen_ops.cc
   screen_user_menu.cc
   screendump.cc

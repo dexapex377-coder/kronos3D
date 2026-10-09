@@ -86,18 +86,15 @@ endif()
 
 # `SRC_DNA_INC` is defined in the parent directory.
 
-# When cross-compiling, makesdna is an IMPORTED host tool (see platform file).
-if(NOT WITH_CROSSCOMPILED_TOOLS)
-  add_c_and_cxx_flags_custom_test(makesdna)
+add_c_and_cxx_flags_custom_test(makesdna)
 
-  add_executable(makesdna ${SRC} ${SRC_DNA_INC})
-  setup_platform_linker_flags(makesdna)
-  setup_platform_linker_libs(makesdna)
-  blender_target_include_dirs(makesdna ${INC})
-  blender_target_include_dirs_sys(makesdna ${INC_SYS})
-  target_link_libraries(makesdna ${LIB})
-  target_link_libraries(makesdna PRIVATE bf::dependencies::pthreads)
-endif()
+add_executable(makesdna ${SRC} ${SRC_DNA_INC})
+setup_platform_linker_flags(makesdna)
+setup_platform_linker_libs(makesdna)
+blender_target_include_dirs(makesdna ${INC})
+blender_target_include_dirs_sys(makesdna ${INC_SYS})
+target_link_libraries(makesdna ${LIB})
+target_link_libraries(makesdna PRIVATE bf::dependencies::pthreads)
 
 # Output dna.cc
 add_custom_command(
@@ -177,6 +174,9 @@ set(INC_SYS
 set(SRC
   ${BLENLIB_SRC}
   ${SRC_DNA_OTHER_INC}
+
+  # Needed by `rna_define.cc` for `UString` identifier storage.
+  ../../blenlib/intern/ustring.cc
 )
 
 set(LIB

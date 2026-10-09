@@ -7,24 +7,19 @@
  */
 
 #include "BLI_time.hh"
-#include "CLG_log.h"
 #include "DNA_material_types.h"
 
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
 #include "BKE_node.hh"
 #include "BKE_node_legacy_types.hh"
+#include "BKE_node_tree_update.hh"
 #include "BKE_scene.hh"
-
-#include "GPU_material.hh"
-#include "GPU_pass.hh"
 
 #include "eevee_instance.hh"
 #include "eevee_material.hh"
 
 namespace blender::eevee {
-
-static CLG_LogRef LOG = {"eevee.material"};
 
 /* -------------------------------------------------------------------- */
 /** \name Material
@@ -53,6 +48,7 @@ MaterialModule::MaterialModule(Instance &inst) : inst_(inst)
                        *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
 
     bke::node_set_active(*ntree, *output);
+    BKE_ntree_update_without_main(*ntree);
   }
   {
     metallic_mat = BKE_id_new_nomain<blender::Material>("EEVEE default metal");
@@ -74,6 +70,7 @@ MaterialModule::MaterialModule(Instance &inst) : inst_(inst)
                        *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
 
     bke::node_set_active(*ntree, *output);
+    BKE_ntree_update_without_main(*ntree);
   }
   {
     default_surface = reinterpret_cast<blender::Material *>(BKE_id_copy_ex(
@@ -100,6 +97,7 @@ MaterialModule::MaterialModule(Instance &inst) : inst_(inst)
                        *bke::node_find_socket(*output, SOCK_IN, "Surface"_ustr));
 
     bke::node_set_active(*ntree, *output);
+    BKE_ntree_update_without_main(*ntree);
   }
 }
 
@@ -175,34 +173,8 @@ MaterialPass MaterialModule::material_pass_get(Object *ob,
     }
     case GPU_MAT_QUEUED:
       queued_shaders_count++;
-      /* Wait for the async compilation to finish instead of synchronous fallback.
-       * On Android, poll with timeout to avoid ANR (app not responding) dialog.
-       * Other platforms wait indefinitely using the existing condition variable. */
-      {
-        GPUPass *pass = GPU_material_get_pass(matpass.gpumat);
-        if (pass) {
-#  ifdef __ANDROID__
-          /* Wait up to 30 seconds for compilation to complete, polling non-blocking. */
-          const double deadline = BLI_time_now_seconds() + 30.0;
-          while (GPU_pass_status(pass) == GPU_PASS_QUEUED) {
-            if (BLI_time_now_seconds() >= deadline) {
-              CLOG_WARN(&LOG, "EEVEE material compilation timed out after 30s, falling back to default material");
-              break;
-            }
-            /* Small sleep to avoid busy-waiting; async worker runs in background. */
-            BLI_time_sleep_ms(10);
-          }
-#  else
-          /* Non-Android: use the existing blocking wait via condition variable. */
-          GPU_pass_ensure_its_ready(pass);
-#  endif
-        }
-        /* If still queued after wait (timeout on Android), fall back to default material. */
-        if (GPU_material_status(matpass.gpumat) == GPU_MAT_QUEUED) {
-          matpass.gpumat = inst_.shaders.material_shader_get(
-              default_mat, default_mat->nodetree, pipeline_type, geometry_type, false, nullptr);
-        }
-      }
+      matpass.gpumat = inst_.shaders.material_shader_get(
+          default_mat, default_mat->nodetree, pipeline_type, geometry_type, false, nullptr);
       break;
     case GPU_MAT_FAILED:
     default:
@@ -210,12 +182,34 @@ MaterialPass MaterialModule::material_pass_get(Object *ob,
           error_mat_, error_mat_->nodetree, pipeline_type, geometry_type, false, nullptr);
       break;
   }
+#  ifdef __ANDROID__
+  /* A deferred material can still be QUEUED here and the assert below would abort the app.
+   * Poll instead of blocking on a condition variable from the main thread: that blocking
+   * wait was the original Android ANR. */
+  if (GPU_material_status(matpass.gpumat) == GPU_MAT_QUEUED) {
+    GPUPass *pass = GPU_material_get_pass(matpass.gpumat);
+    if (pass) {
+      const double deadline = BLI_time_now_seconds() + 30.0;
+      while (GPU_pass_status(pass) == GPU_PASS_QUEUED) {
+        if (BLI_time_now_seconds() >= deadline) {
+          CLOG_WARN(&LOG,
+                    "EEVEE material compilation timed out after 30s, falling back to default");
+          matpass.gpumat = inst_.shaders.material_shader_get(
+              default_mat, default_mat->nodetree, pipeline_type, geometry_type, false, nullptr);
+          break;
+        }
+        BLI_time_sleep_ms(10);
+      }
+    }
+  }
+#  endif
   /* Returned material should be ready to be drawn. */
   BLI_assert(GPU_material_status(matpass.gpumat) == GPU_MAT_SUCCESS);
 
   inst_.manager->register_layer_attributes(matpass.gpumat);
 
-  const bool is_transparent = GPU_material_flag_get(matpass.gpumat, GPU_MATFLAG_TRANSPARENT);
+  const bool is_transparent = GPU_material_flag_get(matpass.gpumat, GPU_MATFLAG_TRANSPARENT) ||
+                              geometry_type == MAT_GEOM_GSPLAT;
 
   bool pass_updated = GPU_material_compilation_timestamp(matpass.gpumat) > gpu_pass_last_update_;
 
@@ -380,6 +374,12 @@ blender::Material *MaterialModule::material_from_slot(Object *ob, int slot)
   if (ma == nullptr) {
     if (ob->type == OB_VOLUME) {
       return BKE_material_default_volume();
+    }
+    if (ob->type == OB_POINTCLOUD) {
+      PointCloud &pointcloud = DRW_object_get_data_for_drawing<PointCloud>(*ob);
+      if (pointcloud.type == PointCloudType::GSplat) {
+        return BKE_material_default_gsplat();
+      }
     }
     return BKE_material_default_surface();
   }

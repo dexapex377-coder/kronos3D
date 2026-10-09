@@ -227,7 +227,7 @@ struct MainColorspace {
    * File working color-space for all scene linear colors.
    * The name is only for the user interface and is not a unique identifier, the matrix is
    * the XYZ color-space is the source of truth.
-   * */
+   */
   char scene_linear_name[64 /*MAX_COLORSPACE_NAME*/] = "";
   float3x3 scene_linear_to_xyz = float3x3::zero();
 
@@ -236,6 +236,8 @@ struct MainColorspace {
    * used to create this blend file is missing.
    */
   bool is_missing_opencolorio_config = false;
+  /** The OpenColorIO config failed to load. */
+  bool is_failed_opencolorio_config = false;
 };
 
 struct Main : NonCopyable, NonMovable {
@@ -274,7 +276,8 @@ struct Main : NonCopyable, NonMovable {
    * compatibility issues (data loss).
    *
    * \note In practice currently this is only based on the version numbers, in the future it
-   * could try to use more refined detection on load. */
+   * could try to use more refined detection on load.
+   */
   bool has_forward_compatibility_issues = false;
 
   /**
@@ -690,7 +693,7 @@ void BKE_main_library_weak_reference_add(ID *local_id,
 
 #define FOREACH_MAIN_LISTBASE_ID_BEGIN(_lb, _id) \
   { \
-    ID *_id_next = static_cast<ID *>((_lb)->first); \
+    ID *_id_next = static_cast<ID *>((_lb)->first_); \
     for ((_id) = _id_next; (_id) != nullptr; (_id) = _id_next) { \
       _id_next = static_cast<ID *>((_id)->next);
 
@@ -718,7 +721,8 @@ void BKE_main_library_weak_reference_add(ID *local_id,
  * before objects, which will be processed before obdata types, etc.).
  *
  * WARNING: DO NOT use break statement with that macro, use #FOREACH_MAIN_LISTBASE and
- * #FOREACH_MAIN_LISTBASE_ID instead if you need that kind of control flow. */
+ * #FOREACH_MAIN_LISTBASE_ID instead if you need that kind of control flow.
+ */
 #define FOREACH_MAIN_ID_BEGIN(_bmain, _id) \
   { \
     ListBaseT<ID> *_lb; \
@@ -804,15 +808,15 @@ MainListsArray BKE_main_lists_get(Main &bmain);
  * An iterator over all IDs in the given Main.
  *
  * As with the historic C-based APIs, order is defined by these rules:
- *   - ID types are iterated based on their #eID_Index, from lowest value to highest by default
- *     (starting with libraries).
+ *   - ID types are iterated based on their #eID_Index, by default from higher index to lower one
+ *     (for historical reasons). This can be inverted by using the #reverse_id_type_order option.
  *   - Within a same type, IDs are iterated based on their libraries (local IDs always iterated
  *     first) and names (alphanumeric sorting).
  *
  * This iterator will remain stable if the underlying Main is modified, as long as the current ID
  * pointed at by the iterator is not modified.
- *   - Renaming the current ID may shift it position in the underlying main, making the iterator no
- *     more stable (some items may be skipped, or iterated over several times).
+ *   - Renaming the current ID may shift its position in the underlying main, making the iterator
+ *     unstable (some items may be skipped, or iterated over several times).
  *   - Deleting the current ID will fully invalidate the iterator, attempt to use it in any way
  *     afterwards will result in invalid memory accesses.
  */
@@ -826,30 +830,75 @@ class MainAllIDsIterator {
 
  private:
   MainListsArray lbarray_;
-  int64_t curr_lbarray_index_ = -1;
+  bool reverse_id_type_order_ = false;
+  int64_t curr_lbarray_index_;
   ID *curr_id_ = nullptr;
 
  public:
   /* Note: default constructor is a requirement to make the iterator usable with std::ranges. */
   MainAllIDsIterator() : lbarray_{}
   {
+    curr_lbarray_index_ = lbarray_index_lower_bound();
     ++(*this);
   }
 
-  explicit MainAllIDsIterator(MainListsArray &lbarray) : lbarray_(lbarray)
+  explicit MainAllIDsIterator(MainListsArray &lbarray, const bool reverse_id_type_order = false)
+      : lbarray_(lbarray), reverse_id_type_order_(reverse_id_type_order)
   {
+    curr_lbarray_index_ = lbarray_index_lower_bound();
     ++(*this);
   }
 
-  explicit MainAllIDsIterator(Main &bmain) : lbarray_(BKE_main_lists_get(bmain))
+  explicit MainAllIDsIterator(Main &bmain, const bool reverse_id_type_order = false)
+      : lbarray_(BKE_main_lists_get(bmain)), reverse_id_type_order_(reverse_id_type_order)
   {
+    curr_lbarray_index_ = lbarray_index_lower_bound();
     ++(*this);
   }
 
+ private:
+  /** Exclusive: Return the invalid index 'just before' the first valid one. */
+  int64_t lbarray_index_lower_bound() const
+  {
+    return reverse_id_type_order_ ? -1 : int64_t(lbarray_.size());
+  }
+
+  /** Exclusive: Return the invalid index 'just after' the last valid one. */
+  int64_t lbarray_index_upper_bound() const
+  {
+    return reverse_id_type_order_ ? int64_t(lbarray_.size()) : -1;
+  }
+
+  bool lbarray_index_is_valid() const
+  {
+    return (curr_lbarray_index_ >= -1 && curr_lbarray_index_ <= int64_t(lbarray_.size()));
+  }
+
+  void lbarray_index_step_next()
+  {
+    if (reverse_id_type_order_) {
+      curr_lbarray_index_++;
+    }
+    else {
+      curr_lbarray_index_--;
+    }
+  }
+
+  void lbarray_index_step_prev()
+  {
+    if (reverse_id_type_order_) {
+      curr_lbarray_index_--;
+    }
+    else {
+      curr_lbarray_index_++;
+    }
+  }
+
+ public:
   MainAllIDsIterator begin() const
   {
     MainAllIDsIterator tmp = *this;
-    tmp.curr_lbarray_index_ = -1;
+    tmp.curr_lbarray_index_ = tmp.lbarray_index_lower_bound();
     tmp.curr_id_ = nullptr;
     return ++tmp;
   }
@@ -857,7 +906,7 @@ class MainAllIDsIterator {
   MainAllIDsIterator end() const
   {
     MainAllIDsIterator tmp = *this;
-    tmp.curr_lbarray_index_ = tmp.lbarray_.size();
+    tmp.curr_lbarray_index_ = tmp.lbarray_index_upper_bound();
     tmp.curr_id_ = nullptr;
     return tmp;
   }

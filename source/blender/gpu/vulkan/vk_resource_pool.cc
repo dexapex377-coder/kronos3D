@@ -9,8 +9,6 @@
 #include "vk_resource_pool.hh"
 #include "vk_backend.hh"
 #include "vk_context.hh"
-#include "vk_device.hh"
-#include "vk_pipeline_diag.hh"
 
 namespace blender::gpu {
 
@@ -25,7 +23,6 @@ void VKDiscardPool::move_data(VKDiscardPool &src_pool, TimelineValue timeline)
   src_pool.buffer_views_.update_timeline(timeline);
   src_pool.buffers_.update_timeline(timeline);
   src_pool.image_views_.update_timeline(timeline);
-  src_pool.framebuffers_.update_timeline(timeline);
   src_pool.images_.update_timeline(timeline);
   src_pool.shader_modules_.update_timeline(timeline);
   src_pool.pipelines_.update_timeline(timeline);
@@ -38,7 +35,6 @@ void VKDiscardPool::move_data(VKDiscardPool &src_pool, TimelineValue timeline)
   buffer_views_.extend(std::move(src_pool.buffer_views_));
   buffers_.extend(std::move(src_pool.buffers_));
   image_views_.extend(std::move(src_pool.image_views_));
-  framebuffers_.extend(std::move(src_pool.framebuffers_));
   images_.extend(std::move(src_pool.images_));
   shader_modules_.extend(std::move(src_pool.shader_modules_));
   pipelines_.extend(std::move(src_pool.pipelines_));
@@ -68,18 +64,8 @@ void VKDiscardPool::discard_allocation(VmaAllocation vma_allocation)
 
 void VKDiscardPool::discard_image_view(VkImageView vk_image_view)
 {
-  /* Render-pass fallback framebuffers reference image views directly; when a view
-   * is discarded, retire any framebuffer built from it at the same timeline so a
-   * recycled view handle can't resurrect a stale framebuffer (GPU hang). */
-  VKBackend::get().device.render_pass_fallback.discard_framebuffers_for_view(vk_image_view, *this);
   std::scoped_lock mutex(mutex_);
   image_views_.append_timeline(timeline_, vk_image_view);
-}
-
-void VKDiscardPool::discard_framebuffer(VkFramebuffer vk_framebuffer)
-{
-  std::scoped_lock mutex(mutex_);
-  framebuffers_.append_timeline(timeline_, vk_framebuffer);
 }
 
 void VKDiscardPool::discard_buffer(ResourceHandle buffer_handle, VmaAllocation vma_allocation)
@@ -128,20 +114,10 @@ void VKDiscardPool::destroy_discarded_resources(VKDevice &device, TimelineValue 
 {
   std::scoped_lock mutex(mutex_);
 
-  static int destroy_counter = 0;
-  if ((destroy_counter++ % 900) == 0) {
-    vk_pipeline_diag_logf("DISCARD-POOL destroy #%d | tl=%llu",
-                          destroy_counter,
-                          (unsigned long long)current_timeline);
-  }
-
   swapchain_images_.remove_old(current_timeline,
                                [&](VkImage vk_image) { device.resources.remove_image(vk_image); });
   image_views_.remove_old(current_timeline, [&](VkImageView vk_image_view) {
     device.functions.vkDestroyImageView(device.vk_handle(), vk_image_view, nullptr);
-  });
-  framebuffers_.remove_old(current_timeline, [&](VkFramebuffer vk_framebuffer) {
-    device.functions.vkDestroyFramebuffer(device.vk_handle(), vk_framebuffer, nullptr);
   });
 
   allocations_.remove_old(current_timeline, [&](VmaAllocation vma_allocation) {

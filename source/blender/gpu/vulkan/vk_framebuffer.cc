@@ -6,8 +6,6 @@
  * \ingroup gpu
  */
 
-#include <algorithm>
-
 #include "vk_framebuffer.hh"
 #include "vk_backend.hh"
 #include "vk_context.hh"
@@ -73,19 +71,13 @@ void VKFrameBuffer::bind(bool enabled_srgb)
 
 uint32_t VKFrameBuffer::viewport_size() const
 {
-  if (!this->multi_viewport_) {
-    return 1;
-  }
-  /* Exceeding maxViewports is invalid and faults the GPU rather than being ignored. */
-  const VKDevice &device = VKBackend::get().device;
-  return std::min(uint32_t(GPU_MAX_VIEWPORTS),
-                  device.physical_device_properties_get().limits.maxViewports);
+  return this->multi_viewport_ ? GPU_MAX_VIEWPORTS : 1;
 }
 
 void VKFrameBuffer::vk_viewports_append(Vector<VkViewport, GPU_MAX_VIEWPORTS> &r_viewports) const
 {
   BLI_assert(r_viewports.is_empty());
-  for (int64_t index : IndexRange(this->viewport_size())) {
+  for (int64_t index : IndexRange(this->multi_viewport_ ? GPU_MAX_VIEWPORTS : 1)) {
     VkViewport viewport;
     viewport.x = viewport_[index][0];
     viewport.y = viewport_[index][1];
@@ -104,8 +96,8 @@ void VKFrameBuffer::render_area_update(VkRect2D &render_area) const
     scissor_get(scissor_rect);
     render_area.offset.x = clamp_i(scissor_rect[0], 0, width_);
     render_area.offset.y = clamp_i(scissor_rect[1], 0, height_);
-    render_area.extent.width = clamp_i(scissor_rect[2], 1, width_ - scissor_rect[0]);
-    render_area.extent.height = clamp_i(scissor_rect[3], 1, height_ - scissor_rect[1]);
+    render_area.extent.width = clamp_i(scissor_rect[2], 1, max_ii(1, width_ - scissor_rect[0]));
+    render_area.extent.height = clamp_i(scissor_rect[3], 1, max_ii(1, height_ - scissor_rect[1]));
   }
   else {
     render_area.offset.x = 0;
@@ -129,7 +121,7 @@ void VKFrameBuffer::vk_render_areas_append(
   BLI_assert(r_render_areas.is_empty());
   VkRect2D render_area;
   render_area_update(render_area);
-  r_render_areas.append_n_times(render_area, this->viewport_size());
+  r_render_areas.append_n_times(render_area, this->multi_viewport_ ? GPU_MAX_VIEWPORTS : 1);
 }
 
 bool VKFrameBuffer::check(char /*err_out*/[256])
@@ -700,21 +692,10 @@ void VKFrameBuffer::rendering_ensure_dynamic_rendering(VKContext &context,
                                        VK_IMAGE_ASPECT_STENCIL_BIT;
     VkImageLayout vk_image_layout = is_depth_stencil_attachment ?
                                         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL :
-                                        vk_image_layout_supported(
-                                            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+                                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
     GPUAttachmentState attachment_state = attachment_states_[GPU_FB_DEPTH_ATTACHMENT];
     VkImageView depth_image_view = VK_NULL_HANDLE;
-    VkImageView stencil_image_view = VK_NULL_HANDLE;
     if (attachment_state == GPU_ATTACHMENT_WRITE) {
-      /* Depth and stencil share one view: dynamic rendering requires both attachments to name
-       * the same image view, and a classic render pass has a single depth/stencil attachment.
-       * For a combined format that view must therefore cover both aspects - binding a
-       * stencil-only view leaves depth writes and tests without a target. */
-      const VkImageAspectFlags vk_aspect =
-          is_depth_stencil_attachment ?
-              static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT |
-                                              VK_IMAGE_ASPECT_STENCIL_BIT) :
-              static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT);
       VKImageViewInfo image_view_info = {
           eImageViewUsage::Attachment,
           IndexRange(max_ii(attachment.layer, 0), 1),
@@ -722,9 +703,9 @@ void VKFrameBuffer::rendering_ensure_dynamic_rendering(VKContext &context,
           {{'r', 'g', 'b', 'a'}},
           VKImageViewArrayed::DONT_CARE,
           to_vk_format(depth_texture.device_format_get()),
-          vk_aspect};
+          is_stencil_attachment ? static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_STENCIL_BIT) :
+                                  static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_DEPTH_BIT)};
       depth_image_view = depth_texture.image_view_get(image_view_info).vk_handle();
-      stencil_image_view = depth_image_view;
     }
     VkFormat vk_format = (!extensions.dynamic_rendering_unused_attachments &&
                           depth_image_view == VK_NULL_HANDLE) ?
@@ -749,7 +730,7 @@ void VKFrameBuffer::rendering_ensure_dynamic_rendering(VKContext &context,
     if (is_stencil_attachment) {
       VkRenderingAttachmentInfo &attachment_info = begin_rendering.node_data.stencil_attachment;
       attachment_info.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-      attachment_info.imageView = stencil_image_view;
+      attachment_info.imageView = depth_image_view;
       attachment_info.imageLayout = vk_image_layout;
 
       set_load_store(attachment_info, GPU_DATA_UINT, load_stores[depth_attachment_index]);
@@ -769,16 +750,6 @@ void VKFrameBuffer::rendering_ensure_dynamic_rendering(VKContext &context,
          {uint32_t(attachment.mip), 1, uint32_t(max_ii(attachment.layer, 0)), 1}});
     break;
   }
-
-  /* Attachment formats for the render-pass fallback (devices without dynamic
-   * rendering). Kept alongside the rendering info so the emission point can
-   * synthesize a compatible VkRenderPass. */
-  for (int i = 0; i < 8; i++) {
-    begin_rendering.node_data.color_formats[i] =
-        i < color_attachment_formats_.size() ? color_attachment_formats_[i] : VK_FORMAT_UNDEFINED;
-  }
-  begin_rendering.node_data.depth_format = depth_attachment_format_;
-  begin_rendering.node_data.stencil_format = stencil_attachment_format_;
 
   context.render_graph().add_node(begin_rendering);
 }

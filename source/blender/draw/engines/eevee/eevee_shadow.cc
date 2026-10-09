@@ -9,19 +9,14 @@
  */
 
 #include "BLI_math_matrix.hh"
-
-#ifdef __ANDROID__
-#  include <unistd.h>
-#  include <android/log.h>
-#endif
 #include "GPU_batch_utils.hh"
+#include "GPU_capabilities.hh"
 #include "GPU_compute.hh"
 
 #include "GPU_context.hh"
 #include "eevee_instance.hh"
 
 #include "GPU_debug.hh"
-#include "GPU_state.hh"
 #include "draw_cache.hh"
 #include "draw_debug.hh"
 
@@ -259,7 +254,7 @@ void ShadowPunctual::end_sync(Light &light)
         light.type, object_to_world, near, far, face, light.shadow_set_membership);
   }
 
-  light.local().tilemaps_count = tilemaps_needed;
+  light.local.tilemaps_count = tilemaps_needed;
   light.tilemap_index = tilemap_pool.tilemaps_data.size();
   for (ShadowTileMap *tilemap : tilemaps_) {
     /* Add shadow tile-maps grouped by lights to the GPU buffer. */
@@ -290,7 +285,8 @@ void ShadowPunctual::end_sync(Light &light)
 eShadowProjectionType ShadowDirectional::directional_distribution_type_get(const Camera &camera)
 {
   /* TODO(fclem): Enable the cascade projection if the FOV is tiny in perspective mode. */
-  return camera.is_perspective() ? SHADOW_PROJECTION_CLIPMAP : SHADOW_PROJECTION_CASCADE;
+  return (camera.is_perspective() || camera.is_panoramic()) ? SHADOW_PROJECTION_CLIPMAP :
+                                                              SHADOW_PROJECTION_CASCADE;
 }
 
 /************************************************************************
@@ -381,9 +377,9 @@ void ShadowDirectional::cascade_tilemaps_distribution(Light &light, const Camera
   /* Offset in tiles between the first and the last tile-maps. */
   int2 offset_vector = int2(round(farthest_tilemap_center / tile_size));
 
-  light.sun().clipmap_base_offset_neg = int2(0); /* Unused. */
-  light.sun().clipmap_base_offset_pos = (offset_vector * (1 << 16)) /
-                                        max_ii(levels_range.size() - 1, 1);
+  light.sun.clipmap_base_offset_neg = int2(0); /* Unused. */
+  light.sun.clipmap_base_offset_pos = (offset_vector * (1 << 16)) /
+                                      max_ii(levels_range.size() - 1, 1);
 
   /* \note cascade_level_range starts the range at the unique LOD to apply to all tile-maps. */
   int level = levels_range.first();
@@ -392,7 +388,7 @@ void ShadowDirectional::cascade_tilemaps_distribution(Light &light, const Camera
 
     /* Equal spacing between cascades layers since we want uniform shadow density. */
     int2 level_offset = origin_offset +
-                        shadow_cascade_grid_offset(light.sun().clipmap_base_offset_pos, i);
+                        shadow_cascade_grid_offset(light.sun.clipmap_base_offset_pos, i);
     tilemap->sync_orthographic(
         object_mat, level_offset, level, SHADOW_PROJECTION_CASCADE, light.shadow_set_membership);
 
@@ -401,14 +397,14 @@ void ShadowDirectional::cascade_tilemaps_distribution(Light &light, const Camera
     tilemap->set_updated();
   }
 
-  light.sun().clipmap_origin = float2(origin_offset) * tile_size;
+  light.sun.clipmap_origin = float2(origin_offset) * tile_size;
 
   light.type = LIGHT_SUN_ORTHO;
 
   /* Not really clip-maps, but this is in order to make #light_tilemap_max_get() work and determine
    * the scaling. */
-  light.sun().clipmap_lod_min = levels_range.first();
-  light.sun().clipmap_lod_max = levels_range.last();
+  light.sun.clipmap_lod_min = levels_range.first();
+  light.sun.clipmap_lod_max = levels_range.last();
 }
 
 /************************************************************************
@@ -476,8 +472,8 @@ void ShadowDirectional::clipmap_tilemaps_distribution(Light &light, const Camera
   }
 
   /* Number of levels is limited to 32 by `clipmap_level_range()` for this reason. */
-  light.sun().clipmap_base_offset_pos = pos_offset;
-  light.sun().clipmap_base_offset_neg = neg_offset;
+  light.sun.clipmap_base_offset_pos = pos_offset;
+  light.sun.clipmap_base_offset_neg = neg_offset;
 
   float tile_size_max = ShadowDirectional::tile_size_get(levels_range.last());
   int2 level_offset_max = tilemaps_[levels_range.size() - 1]->grid_offset;
@@ -491,10 +487,10 @@ void ShadowDirectional::clipmap_tilemaps_distribution(Light &light, const Camera
   light.object_to_world.y.w = location.y;
   light.object_to_world.z.w = location.z;
   /* Used as origin for the clipmap_base_offset trick. */
-  light.sun().clipmap_origin = float2(level_offset_max * tile_size_max);
+  light.sun.clipmap_origin = float2(level_offset_max * tile_size_max);
 
-  light.sun().clipmap_lod_min = levels_range.first();
-  light.sun().clipmap_lod_max = levels_range.last();
+  light.sun.clipmap_lod_min = levels_range.first();
+  light.sun.clipmap_lod_max = levels_range.last();
 }
 
 void ShadowDirectional::release_excess_tilemaps(const Light &light, const Camera &camera)
@@ -607,23 +603,8 @@ void ShadowModule::init()
   }
 
   /* Pool size is in MBytes. */
-  int pool_size_mb = scene.eevee.shadow_pool_size;
-#ifdef __ANDROID__
-  /* The desktop default (512MB) is larger than the GPU budget of any phone, and it is reserved
-   * up front even for a small material preview.
-   *
-   * This used to be capped only below 6GB of system memory, which reads the wrong number: the
-   * constraint is the GPU allocation budget, and on a mobile part that is shared with everything
-   * else on the device however much RAM is fitted. A Galaxy S24 Ultra has 12GB and still had the
-   * scene killed -- the pool does not appear in the process RSS, so the reservation was invisible
-   * right up to the point where Android SIGKILLed the foreground application. Cap it on Android
-   * regardless of how much memory the device reports.
-   *
-   * 64MB still holds a useful number of shadow pages for a phone-sized viewport; the pool is a
-   * cache, so a smaller one costs shadow detail at a distance, not correctness. */
-  pool_size_mb = min_ii(pool_size_mb, 64);
-#endif
-  const size_t pool_byte_size = enabled_ ? size_t(pool_size_mb) * square_i(1024) : 1;
+  const size_t pool_byte_size = enabled_ ? size_t(scene.eevee.shadow_pool_size) * square_i(1024) :
+                                           1;
   const size_t page_byte_size = square_i(shadow_page_size_) * sizeof(int);
   shadow_page_len_ = int(divide_ceil_ul(pool_byte_size, page_byte_size));
   shadow_page_len_ = min_ii(shadow_page_len_, SHADOW_MAX_PAGE);
@@ -669,43 +650,6 @@ void ShadowModule::init()
     if (stats.view_needed_count > SHADOW_VIEW_MAX && enabled_) {
       inst_.info_append_i18n("Error: Too many shadow updates, some shadows might be incorrect.");
     }
-#ifdef __ANDROID__
-    {
-      static int shadow_diag_frame = 0;
-      ++shadow_diag_frame;
-      if (shadow_diag_frame % 30 == 0 || (stats.page_used_count > shadow_page_len_ && enabled_)) {
-        int shadowed_lights = 0;
-        for (const Light &light : inst_.lights.light_map_.values()) {
-          if (light.tilemap_index != LIGHT_NO_SHADOW) {
-            shadowed_lights++;
-          }
-        }
-        pages_infos_data_.read();
-        __android_log_print(ANDROID_LOG_INFO,
-                            "eevee_shadow",
-                            "init used=%d upd=%d alloc=%d rndr=%d views=%d len=%d "
-                            "| tilemaps=%d shadowed=%d casters=%d full_upd=%d"
-                            "| fin:used=%d upd=%d grp=%d"
-                            "| allocG=%d finG=%d finS=%d",
-                            stats.page_used_count,
-                            stats.page_update_count,
-                            stats.page_allocated_count,
-                            stats.page_rendered_count,
-                            stats.view_needed_count,
-                            shadow_page_len_,
-                            (int)tilemap_pool.tilemaps_data.size(),
-                            shadowed_lights,
-                            (int)objects_.size(),
-                            do_full_update_,
-                            stats.diag_finalize_used,
-                            stats.diag_finalize_update,
-                            stats.diag_finalize_groups,
-                            pages_infos_data_._pad0,
-                            pages_infos_data_._pad1,
-                            pages_infos_data_._pad2);
-      }
-    }
-#endif
   }
 
   atlas_tx_.filter_mode(false);
@@ -713,7 +657,7 @@ void ShadowModule::init()
   /* Create different viewport to support different update region size. The most fitting viewport
    * is then selected during the tilemap finalize stage in `viewport_select`. */
   for (int i = 0; i < multi_viewports_.size(); i++) {
-    /** IMPORTANT: Reflect changes in TBDR tile vertex shader which assumes viewport index 15
+    /* IMPORTANT: Reflect changes in TBDR tile vertex shader which assumes viewport index 15
      * covers the whole framebuffer. */
     int size_in_tile = min_ii(1 << i, SHADOW_TILEMAP_RES);
     multi_viewports_[i][0] = 0;
@@ -804,9 +748,10 @@ void ShadowModule::begin_sync()
 void ShadowModule::sync_object(const ObjectHandle &ob_handle,
                                bool is_alpha_blend,
                                bool has_transparent_shadows,
-                               bool has_time_dependent_shadows)
+                               bool has_time_dependent_shadows,
+                               bool has_offset_shadows)
 {
-  if (is_alpha_blend && !inst_.is_baking()) {
+  if ((is_alpha_blend && !inst_.is_baking()) || has_offset_shadows) {
     tilemap_usage_transparent_ps_->draw(box_batch_, ob_handle.res_handle);
   }
 
@@ -878,29 +823,6 @@ void ShadowModule::end_sync()
     }
   }
   tilemap_pool.end_sync(*this);
-
-#ifdef __ANDROID__
-  {
-    static int sync_counter = 0;
-    ++sync_counter;
-    if (sync_counter % 30 == 0) {
-      int shadowed_lights = 0;
-      for (const Light &light : inst_.lights.light_map_.values()) {
-        if (light.tilemap_index != LIGHT_NO_SHADOW) {
-          shadowed_lights++;
-        }
-      }
-      __android_log_print(ANDROID_LOG_INFO,
-                          "eevee_shadow",
-                          "sync enabled=%d shadowed=%d tilemaps=%d casters=%d page_len=%d",
-                          enabled_,
-                          shadowed_lights,
-                          (int)tilemap_pool.tilemaps_data.size(),
-                          (int)objects_.size(),
-                          shadow_page_len_);
-    }
-  }
-#endif
 
   /* Search for deleted or updated shadow casters */
   auto it_end = objects_.items().end();
@@ -1153,6 +1075,7 @@ void ShadowModule::end_sync()
         sub.bind_ssbo("render_view_buf", &render_view_buf_);
         sub.bind_ssbo("tilemaps_clip_buf", &tilemap_pool.tilemaps_clip);
         sub.bind_image("tilemaps_img", &tilemap_pool.tilemap_tx);
+        sub.push_constant("use_multi_viewport", GPU_multi_viewport_support());
         sub.dispatch(int3(1, 1, tilemap_pool.tilemaps_data.size()));
         sub.barrier(GPU_BARRIER_SHADER_STORAGE | GPU_BARRIER_UNIFORM | GPU_BARRIER_TEXTURE_FETCH |
                     GPU_BARRIER_SHADER_IMAGE_ACCESS);
@@ -1273,7 +1196,7 @@ bool ShadowModule::shadow_update_finished(int loop_count)
   }
 
   if (loop_count == 1) {
-    /* Do not reedback for only 1 loop iter. It's cheaper to just resubmit. */
+    /* Do not read-back for only 1 loop iter. It's cheaper to just resubmit. */
     return false;
   }
 
@@ -1404,9 +1327,6 @@ void ShadowModule::render(View &view, int2 extent)
     GPU_debug_group_begin("Shadow");
     {
       GPU_uniformbuf_clear_to_zero(shadow_multi_view_.matrices_ubo_get());
-      /* DOWNSTREAM (Android): port upstream c394b602b67e "EEVEE: Shadow: Clear rendermap to
-       * invalid pages" (multi-viewport workaround). The whole rendermap is cleared once so
-       * stale pages from previous frames / non-updated tilemaps are never drawn. */
       GPU_storagebuf_clear(render_map_buf_, 0xFFFFFFFFu);
 
       run_tagging_ = (loop_count == 0);
@@ -1437,44 +1357,23 @@ void ShadowModule::render(View &view, int2 extent)
       }
 
       GPU_framebuffer_bind(render_fb_);
-      GPU_framebuffer_multi_viewports_set(render_fb_,
-                                          reinterpret_cast<int (*)[4]>(multi_viewports_.data()));
-
-#ifdef __ANDROID__
-      {
-        static uint rendermap_readback[SHADOW_RENDER_MAP_SIZE];
-        GPU_storagebuf_read(render_map_buf_, rendermap_readback);
-        uint n_pages = 0;
-        for (uint i = 0; i < SHADOW_RENDER_MAP_SIZE; i++) {
-          if (rendermap_readback[i] != 0xFFFFFFFFu) {
-            n_pages++;
-          }
-        }
-        __android_log_print(ANDROID_LOG_INFO,
-                            "eevee_shadow",
-                            "SHADOW-RENDER pre loop=%d N=%u",
-                            loop_count,
-                            n_pages);
+      const int4 &largest_viewport = multi_viewports_[SHADOW_TILEMAP_LOD];
+      if (GPU_multi_viewport_support()) {
+        GPU_framebuffer_multi_viewports_set(render_fb_,
+                                            reinterpret_cast<int (*)[4]>(multi_viewports_.data()));
       }
-#endif
+      else {
+        /* Fallback for GPU's that do not support multiViewport. Always render to the largest
+         * viewport. This spawns a lot more fragment shaders, but at least we can draw the
+         * correct shadows on these systems. See #163697. */
+        GPU_framebuffer_viewport_set(render_fb_,
+                                     largest_viewport.x,
+                                     largest_viewport.y,
+                                     largest_viewport.z,
+                                     largest_viewport.w);
+      }
 
       inst_.pipelines.shadow.render(shadow_multi_view_);
-
-#ifdef __ANDROID__
-      {
-        GPU_finish();
-        statistics_buf_.current().async_flush_to_host();
-        statistics_buf_.current().read();
-        const ShadowStatistics &post_stats = statistics_buf_.current();
-        __android_log_print(ANDROID_LOG_INFO,
-                            "eevee_shadow",
-                            "SHADOW-RENDER post loop=%d rndr=%d alloc=%d upd=%d",
-                            loop_count,
-                            post_stats.page_rendered_count,
-                            post_stats.page_allocated_count,
-                            post_stats.page_update_count);
-      }
-#endif
 
       if (use_flush) {
         GPU_flush();

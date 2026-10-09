@@ -7,14 +7,7 @@
  */
 
 #include <cmath>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <fmt/format.h>
-
-#ifdef __ANDROID__
-#  include <unistd.h>
-#endif
 
 #include "BLI_listbase.hh"
 #include "BLI_math_color_c.hh"
@@ -22,7 +15,6 @@
 #include "BLI_math_half.hh"
 #include "BLI_math_matrix_c.hh"
 #include "BLI_math_rotation_c.hh"
-#include "BLI_perf_probe.hh"
 #include "BLI_rect.hh"
 #include "BLI_string_utf8.hh"
 #include "BLI_string_utils.hh"
@@ -149,7 +141,8 @@ void ED_view3d_update_viewmat(const Depsgraph *depsgraph,
   /* store window coordinates scaling/offset */
   if (!offscreen && rv3d->persp == RV3D_CAMOB && v3d->camera) {
     rctf cameraborder;
-    ED_view3d_calc_camera_border(scene, depsgraph, region, v3d, rv3d, false, false, &cameraborder);
+    cameraborder = BKE_camera_view_border(
+        scene, depsgraph, v3d, rv3d, region->winx, region->winy, false, false, false);
     rv3d->viewcamtexcofac[0] = float(region->winx) / BLI_rctf_size_x(&cameraborder);
     rv3d->viewcamtexcofac[1] = float(region->winy) / BLI_rctf_size_y(&cameraborder);
 
@@ -392,93 +385,11 @@ void ED_view3d_draw_setup_view(const wmWindowManager *wm,
 /** \name Draw View Border
  * \{ */
 
-static void view3d_camera_border(const Scene *scene,
-                                 const Depsgraph *depsgraph,
-                                 const ARegion *region,
-                                 const View3D *v3d,
-                                 const RegionView3D *rv3d,
-                                 rctf *r_viewborder,
-                                 const bool no_shift,
-                                 const bool no_zoom,
-                                 const bool no_roll)
-{
-  CameraParams params;
-  rctf rect_view, rect_camera;
-  Object *camera_eval = DEG_get_evaluated(depsgraph, v3d->camera);
-
-  /* get viewport viewplane */
-  BKE_camera_params_init(&params);
-  BKE_camera_params_from_view3d(&params, depsgraph, v3d, rv3d);
-  if (no_zoom) {
-    params.zoom = 1.0f;
-  }
-  if (no_roll) {
-    params.roll = 0.0f;
-  }
-  BKE_camera_params_compute_viewplane(&params, region->winx, region->winy, 1.0f, 1.0f);
-  rect_view = params.viewplane;
-
-  /* get camera viewplane */
-  BKE_camera_params_init(&params);
-  /* fallback for non camera objects */
-  params.clip_start = v3d->clip_start;
-  params.clip_end = v3d->clip_end;
-  BKE_camera_params_from_object(&params, camera_eval);
-  if (no_shift) {
-    params.shiftx = 0.0f;
-    params.shifty = 0.0f;
-  }
-  if (no_roll) {
-    params.roll = 0.0f;
-  }
-  BKE_camera_params_compute_viewplane(
-      &params, scene->r.xsch, scene->r.ysch, scene->r.xasp, scene->r.yasp);
-  rect_camera = params.viewplane;
-
-  /* get camera border within viewport */
-  r_viewborder->xmin = ((rect_camera.xmin - rect_view.xmin) / BLI_rctf_size_x(&rect_view)) *
-                       region->winx;
-  r_viewborder->xmax = ((rect_camera.xmax - rect_view.xmin) / BLI_rctf_size_x(&rect_view)) *
-                       region->winx;
-  r_viewborder->ymin = ((rect_camera.ymin - rect_view.ymin) / BLI_rctf_size_y(&rect_view)) *
-                       region->winy;
-  r_viewborder->ymax = ((rect_camera.ymax - rect_view.ymin) / BLI_rctf_size_y(&rect_view)) *
-                       region->winy;
-}
-
-void ED_view3d_calc_camera_border_size(const Scene *scene,
-                                       Depsgraph *depsgraph,
-                                       const ARegion *region,
-                                       const View3D *v3d,
-                                       const RegionView3D *rv3d,
-                                       float r_size[2])
-{
-  rctf viewborder;
-
-  view3d_camera_border(scene, depsgraph, region, v3d, rv3d, &viewborder, true, true, false);
-  r_size[0] = BLI_rctf_size_x(&viewborder);
-  r_size[1] = BLI_rctf_size_y(&viewborder);
-}
-
-void ED_view3d_calc_camera_border(const Scene *scene,
-                                  const Depsgraph *depsgraph,
-                                  const ARegion *region,
-                                  const View3D *v3d,
-                                  const RegionView3D *rv3d,
-                                  const bool no_shift,
-                                  const bool no_roll,
-                                  rctf *r_viewborder)
-{
-  view3d_camera_border(
-      scene, depsgraph, region, v3d, rv3d, r_viewborder, no_shift, false, no_roll);
-}
-
 static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, View3D *v3d)
 {
   float x1, x2, y1, y2;
   float x1i, x2i, y1i, y2i;
 
-  rctf viewborder;
   Camera *ca = nullptr;
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
 
@@ -489,7 +400,8 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
     ca = id_cast<Camera *>(v3d->camera->data);
   }
 
-  ED_view3d_calc_camera_border(scene, depsgraph, region, v3d, rv3d, false, true, &viewborder);
+  const rctf viewborder = BKE_camera_view_border(
+      scene, depsgraph, v3d, rv3d, region->winx, region->winy, false, false, true);
   /* the offsets */
   x1 = viewborder.xmin;
   y1 = viewborder.ymin;
@@ -497,6 +409,7 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
   y2 = viewborder.ymax;
 
   const float roll = rv3d->camroll;
+  const bool is_flipped_x = (rv3d->rflag & RV3D_FLIP_X) != 0;
   GPU_line_width(1.0f);
 
   /* apply offsets so the real 3D camera shows through */
@@ -519,12 +432,17 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
     immBindBuiltinProgram(GPU_SHADER_3D_UNIFORM_COLOR);
 
     /* Apply roll. */
-    if (roll != 0.0f) {
+    if (roll != 0.0f || is_flipped_x) {
       GPU_matrix_push();
       const int center_x = region->winx / 2;
       const int center_y = region->winy / 2;
       GPU_matrix_translate_2f(center_x, center_y);
-      GPU_matrix_rotate_2d(RAD2DEG(rv3d->camroll));
+      if (is_flipped_x) {
+        GPU_matrix_scale_2f(-1.0f, 1.0f);
+      }
+      if (roll != 0.0f) {
+        GPU_matrix_rotate_2d(RAD2DEG(roll));
+      }
       GPU_matrix_translate_2f(-center_x, -center_y);
     }
 
@@ -585,7 +503,7 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
 
   /* When overlays are disabled, only show camera outline & passepartout. */
   if (v3d->flag2 & V3D_HIDE_OVERLAYS || !(v3d->flag2 & V3D_SHOW_CAMERA_GUIDES)) {
-    if (roll != 0.0f) {
+    if (roll != 0.0f || is_flipped_x) {
       GPU_matrix_pop();
     }
     return;
@@ -716,7 +634,7 @@ static void drawviewborder(Scene *scene, Depsgraph *depsgraph, ARegion *region, 
                      sizeof(v3d->camera->id.name) - 2);
   }
 
-  if (roll != 0.0f) {
+  if (roll != 0.0f || is_flipped_x) {
     GPU_matrix_pop();
   }
 }
@@ -1227,13 +1145,9 @@ static const char *view3d_get_name(View3D *v3d, RegionView3D *rv3d)
 static void draw_viewport_name(ARegion *region, View3D *v3d, int xoffset, int *yoffset)
 {
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
-  const char *name = view3d_get_name(v3d, rv3d);
-  const char *name_array[3] = {name, nullptr, nullptr};
-  int name_array_len = 1;
-
-  /* 6 is the maximum size of the axis roll text. */
-  /* increase size for unicode languages (Chinese in UTF8...). */
-  char tmpstr[96 + 6];
+  /* Append text directly, the inline buffer avoids allocating in practice. */
+  fmt::memory_buffer name;
+  name.append(StringRef(view3d_get_name(v3d, rv3d)));
 
   if (RV3D_VIEW_IS_AXIS(rv3d->view) && (rv3d->view_axis_roll != RV3D_VIEW_AXIS_ROLL_0)) {
     const char *axis_roll;
@@ -1248,24 +1162,51 @@ static void draw_viewport_name(ARegion *region, View3D *v3d, int xoffset, int *y
         axis_roll = " -90\xC2\xB0";
         break;
     }
-    name_array[name_array_len++] = axis_roll;
+    name.append(StringRef(axis_roll));
   }
 
   if (v3d->localvd) {
-    name_array[name_array_len++] = IFACE_(" (Local)");
+    name.append(StringRef(IFACE_(" (Local)")));
   }
 
   /* Indicate that clipping region is enabled. */
   if (RV3D_CLIPPING_ENABLED(v3d, rv3d)) {
-    name_array[name_array_len++] = IFACE_(" (Clipped)");
+    name.append(StringRef(IFACE_(" (Clipped)")));
   }
 
-  if (name_array_len > 1) {
-    BLI_string_join_array(tmpstr, sizeof(tmpstr), name_array, name_array_len);
-    name = tmpstr;
+  /* Indicate that the view is flipped. */
+  if (rv3d->persp == RV3D_CAMOB) {
+    const eRegionView3D_ViewFlipRoll flip_roll = ED_view3d_effective_flip_axis(rv3d);
+
+    switch (flip_roll) {
+      case eRegionView3D_ViewFlipRoll::FlipOther:
+        name.append(StringRef(IFACE_(" (Flipped) (Rolled)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::FlipX:
+        name.append(StringRef(IFACE_(" (Flipped X)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::FlipY:
+        name.append(StringRef(IFACE_(" (Flipped Y)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::Roll0:
+        break;
+      case eRegionView3D_ViewFlipRoll::Roll90:
+        name.append(StringRef(IFACE_(" (90\xC2\xB0)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::Roll180:
+        name.append(StringRef(IFACE_(" (180\xC2\xB0)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::Roll270:
+        name.append(StringRef(IFACE_(" (-90\xC2\xB0)")));
+        break;
+      case eRegionView3D_ViewFlipRoll::RollOther:
+        name.append(StringRef(IFACE_(" (Rolled)")));
+        break;
+    }
   }
+
   *yoffset -= VIEW3D_OVERLAY_LINEHEIGHT;
-  BLF_draw_default(xoffset, *yoffset, 0.0f, name, sizeof(tmpstr));
+  BLF_draw_default(xoffset, *yoffset, 0.0f, name.data(), name.size());
 }
 
 static bool is_grease_pencil_with_layer_keyframe(const Object &ob)
@@ -1525,111 +1466,6 @@ static void draw_performance_stats(Depsgraph *depsgraph,
   draw_time_stat(labels[TOTAL], total_time);
 }
 
-#if defined(__ANDROID__)
-/**
- * Always-on runtime diagnostics for the Statistics overlay.
- *
- * Reads are only valid while the viewport is actively redrawing, and that is
- * intentional, not a bug: with `draw_aa=false` (TAA capped to 1 sample) the
- * viewport no longer redraws in idle, so there are no new frames to sample.
- * The counter refreshes while interacting (orbit/pan/zoom) or during playback --
- * read it then, not at rest. That is the measurement criterion for all
- * performance experiments.
- *
- * Unlike the animation-player FPS (`ED_scene_draw_fps`) and the event-driven
- * "Performance" readout (depsgraph evaluation + CPU-side sync/submission), this
- * timestamps consecutive viewport redraws: it reports the frame rate rendering
- * actually delivers without depending on playback or edits.
- *
- * - FPS: exponential moving average of frame-to-frame delta, reacting within a
- *   couple of redraws. In idle there are no redraws, so the readout holds the
- *   last measured value and appends "(idle)" instead of pretending a number.
- * - RAM: resident set size of this process (MiB), refreshed once a second from
- *   /proc/self/statm. Android exposes no per-app GPU utilization to non-root
- *   apps, so no GPU metric is shown on purpose (RAM does have a public API,
- *   GPU utilization does not).
- */
-static void draw_android_perf_stats(const float text_color[4],
-                                    const int xoffset,
-                                    int *yoffset,
-                                    const int line_height)
-{
-  using Clock = std::chrono::steady_clock;
-
-  const Clock::time_point now = Clock::now();
-
-  /* Exponential moving average of per-frame time, updated on every redraw so the
-   * readout reacts within a couple of frames. A gap between redraws means idle
-   * (no new frames being produced) -- do not feed it to the average, and surface
-   * it on screen instead so it is obvious the number is held, not broken. */
-  static Clock::time_point prev_frame = Clock::now();
-  static bool have_frame = false;
-  static double ema_ms = 0.0;
-  static constexpr double ema_alpha = 0.15;
-  static constexpr double frame_gap_ms = 500.0;
-
-  const double dt_ms = std::chrono::duration<double, std::milli>(now - prev_frame).count();
-  const bool stale = have_frame && dt_ms >= frame_gap_ms;
-  prev_frame = now;
-  if (dt_ms > 0.0 && dt_ms < frame_gap_ms) {
-    ema_ms = have_frame ? ema_ms + ema_alpha * (dt_ms - ema_ms) : dt_ms;
-    have_frame = true;
-  }
-
-  /* RSS once a second. */
-  static int ram_mb = -1;
-  static Clock::time_point last_tick = Clock::now();
-  if (now - last_tick >= std::chrono::seconds(1)) {
-    last_tick = now;
-    long pages = -1;
-    FILE *f = fopen("/proc/self/statm", "r");
-    if (f != nullptr) {
-      if (fscanf(f, "%*ld %ld", &pages) == 1) {
-        const long page_kb = long(sysconf(_SC_PAGESIZE) / 1024);
-        ram_mb = int((pages * page_kb) / 1024);
-      }
-      fclose(f);
-    }
-  }
-
-  const int font_id = BLF_default();
-  const std::string labels[2] = {"FPS (real)", "RAM (app)"};
-
-  float longest_label = 0;
-  for (const std::string &label : labels) {
-    longest_label = std::max(longest_label, BLF_width(font_id, label.c_str(), label.size()));
-  }
-
-  const int xoffset2 = xoffset + int(longest_label) + int(0.5f * U.widget_unit);
-
-  std::string values[2];
-  /* FPS in red when it drops below this mobile-target floor. */
-  const float alert_fps = 30.0f;
-  if (have_frame) {
-    const double fps = 1000.0 / ema_ms;
-    values[0] = fmt::format("{:.1f} ({:.1f} ms)", fps, ema_ms);
-    if (stale) {
-      values[0] += " (idle)";
-    }
-    if (fps < alert_fps) {
-      float4 alert_rgb = get_low_fps_color();
-      BLF_color4fv(font_id, alert_rgb);
-    }
-  }
-  else {
-    values[0] = "--";
-  }
-  values[1] = (ram_mb >= 0) ? fmt::format("{} MiB", ram_mb) : "N/D";
-
-  for (int i = 0; i < 2; i++) {
-    *yoffset -= line_height;
-    BLF_draw_default(xoffset, *yoffset, 0.0f, labels[i].c_str(), labels[i].size());
-    BLF_draw_default(xoffset2, *yoffset, 0.0f, values[i].c_str(), values[i].size());
-  }
-  BLF_color4fv(font_id, text_color);
-}
-#endif /* __ANDROID__ */
-
 void view3d_draw_region_info(const bContext *C, ARegion *region)
 {
   RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
@@ -1753,9 +1589,6 @@ void view3d_draw_region_info(const bContext *C, ARegion *region)
       View3D *v3d_local = v3d->localvd ? v3d : nullptr;
       ED_info_draw_stats(
           bmain, scene, view_layer, v3d_local, xoffset, &yoffset, VIEW3D_OVERLAY_LINEHEIGHT);
-#if defined(__ANDROID__)
-      draw_android_perf_stats(text_color, xoffset, &yoffset, VIEW3D_OVERLAY_LINEHEIGHT);
-#endif
     }
 
     /* Set the size back to the default hard-coded size. Otherwise anyone drawing after this,
@@ -1776,7 +1609,6 @@ void view3d_draw_region_info(const bContext *C, ARegion *region)
 
 static void view3d_draw_view(const bContext *C, ARegion *region)
 {
-  PERF_ZONE(view3d_draw_view);
   ED_view3d_draw_setup_view(CTX_wm_manager(C),
                             CTX_wm_window(C),
                             CTX_data_expect_evaluated_depsgraph(C),
@@ -1992,6 +1824,15 @@ void ED_view3d_draw_offscreen(Depsgraph *depsgraph,
   G.f &= ~G_FLAG_RENDER_VIEWPORT;
 }
 
+static void view3d_draw_offscreen_set_overlay_defaults(View3D &v3d)
+{
+  /* When rendering gpencil objects this opacity is used to mix vertex colors in. */
+  v3d.overlay.gpencil_vertex_paint_opacity = 1.0f;
+  /* Initialize wire-frame properties to the default so it renders properly. */
+  v3d.overlay.wireframe_opacity = 1.0f;
+  v3d.overlay.wireframe_threshold = 0.5f;
+}
+
 void ED_view3d_draw_offscreen_simple(Depsgraph *depsgraph,
                                      Scene *scene,
                                      View3DShading *shading_override,
@@ -2022,7 +1863,7 @@ void ED_view3d_draw_offscreen_simple(Depsgraph *depsgraph,
   region.runtime = &region_runtime;
   RegionView3D rv3d;
 
-  v3d.regionbase.first = v3d.regionbase.last = &region;
+  v3d.regionbase.first_ = v3d.regionbase.last_ = &region;
   region.regiondata = &rv3d;
   region.regiontype = RGN_TYPE_WINDOW;
 
@@ -2031,6 +1872,7 @@ void ED_view3d_draw_offscreen_simple(Depsgraph *depsgraph,
     source_shading_settings = shading_override;
   }
   memcpy(&v3d.shading, source_shading_settings, sizeof(View3DShading));
+  view3d_draw_offscreen_set_overlay_defaults(v3d);
   v3d.shading.type = drawtype;
 
   if (shading_override) {
@@ -2299,13 +2141,15 @@ ImBuf *ED_view3d_draw_offscreen_imbuf_simple(Depsgraph *depsgraph,
                                              char err_out[256])
 {
   View3D v3d = dna::shallow_zero_initialize();
+  view3d_draw_offscreen_set_overlay_defaults(v3d);
+
   ARegion region = {nullptr};
   bke::ARegionRuntime region_runtime{};
   region.runtime = &region_runtime;
   RegionView3D rv3d;
 
   /* connect data */
-  v3d.regionbase.first = v3d.regionbase.last = &region;
+  v3d.regionbase.first_ = v3d.regionbase.last_ = &region;
   region.regiondata = &rv3d;
   region.regiontype = RGN_TYPE_WINDOW;
 
@@ -2341,15 +2185,6 @@ ImBuf *ED_view3d_draw_offscreen_imbuf_simple(Depsgraph *depsgraph,
   v3d.shading.type = drawtype;
 
   v3d.flag2 = V3D_HIDE_OVERLAYS;
-  /* HACK: When rendering gpencil objects this opacity is used to mix vertex colors in when not in
-   * render mode (e.g. in the sequencer). */
-  v3d.overlay.gpencil_vertex_paint_opacity = 1.0f;
-
-  /* Also initialize wire-frame properties to the default so it renders properly in sequencer.
-   * Should find some way to use the viewport's current opacity and threshold,
-   * but this is a start. */
-  v3d.overlay.wireframe_opacity = 1.0f;
-  v3d.overlay.wireframe_threshold = 0.5f;
 
   if (draw_flags & V3D_OFSDRAW_SHOW_ANNOTATION) {
     v3d.flag2 |= V3D_SHOW_ANNOTATION;
@@ -2664,15 +2499,8 @@ void ED_view3d_depth_override(Depsgraph *depsgraph,
   ui::theme::theme_store(&theme_state);
   ui::theme::theme_set(SPACE_VIEW3D, RGN_TYPE_WINDOW);
 
-  ED_view3d_draw_setup_view(static_cast<wmWindowManager *>(G_MAIN->wm.first),
-                            nullptr,
-                            depsgraph,
-                            scene,
-                            region,
-                            v3d,
-                            nullptr,
-                            nullptr,
-                            nullptr);
+  ED_view3d_draw_setup_view(
+      G_MAIN->wm.first(), nullptr, depsgraph, scene, region, v3d, nullptr, nullptr, nullptr);
 
   /* get surface depth without bias */
   rv3d->rflag |= RV3D_ZOFFSET_DISABLED;
@@ -2827,7 +2655,7 @@ void ED_view3d_screen_datamask(const Main &bmain,
   for (const ScrArea &area : screen->areabase) {
     if (area.spacetype == SPACE_VIEW3D) {
       ED_view3d_datamask(
-          bmain, scene, view_layer, static_cast<View3D *>(area.spacedata.first), r_cddata_masks);
+          bmain, scene, view_layer, area.spacedata.first_as<View3D>(), r_cddata_masks);
     }
   }
 }
@@ -2941,42 +2769,21 @@ static bool view3d_main_region_do_render_draw(const Scene *scene)
 bool ED_view3d_calc_render_border(
     const Scene *scene, Depsgraph *depsgraph, View3D *v3d, ARegion *region, rcti *r_rect)
 {
-  RegionView3D *rv3d = static_cast<RegionView3D *>(region->regiondata);
-  bool use_border;
+  const RegionView3D *rv3d = static_cast<const RegionView3D *>(region->regiondata);
 
   /* Test if there is a 3d view rendering. */
   if (v3d->shading.type != OB_RENDER || !view3d_main_region_do_render_draw(scene)) {
     return false;
   }
 
-  /* Test if there is a border render. */
-  if (rv3d->persp == RV3D_CAMOB) {
-    use_border = (scene->r.mode & R_BORDER) != 0;
-  }
-  else {
-    use_border = (v3d->flag2 & V3D_RENDER_BORDER) != 0;
-  }
-
-  if (!use_border) {
+  rctf border;
+  if (!BKE_camera_view_render_border(
+          scene, depsgraph, v3d, rv3d, region->winx, region->winy, &border, nullptr))
+  {
     return false;
   }
 
-  /* Compute border. */
-  if (rv3d->persp == RV3D_CAMOB) {
-    rctf viewborder;
-    ED_view3d_calc_camera_border(scene, depsgraph, region, v3d, rv3d, false, true, &viewborder);
-
-    r_rect->xmin = viewborder.xmin + scene->r.border.xmin * BLI_rctf_size_x(&viewborder);
-    r_rect->ymin = viewborder.ymin + scene->r.border.ymin * BLI_rctf_size_y(&viewborder);
-    r_rect->xmax = viewborder.xmin + scene->r.border.xmax * BLI_rctf_size_x(&viewborder);
-    r_rect->ymax = viewborder.ymin + scene->r.border.ymax * BLI_rctf_size_y(&viewborder);
-  }
-  else {
-    r_rect->xmin = v3d->render_border.xmin * region->winx;
-    r_rect->xmax = v3d->render_border.xmax * region->winx;
-    r_rect->ymin = v3d->render_border.ymin * region->winy;
-    r_rect->ymax = v3d->render_border.ymax * region->winy;
-  }
+  BLI_rcti_rctf_copy_floor(r_rect, &border);
 
   BLI_rcti_translate(r_rect, region->winrct.xmin, region->winrct.ymin);
   BLI_rcti_isect(&region->winrct, r_rect, r_rect);

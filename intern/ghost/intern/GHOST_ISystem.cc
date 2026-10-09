@@ -28,8 +28,6 @@
 #  include "GHOST_SystemWin32.hh"
 #elif defined(__APPLE__)
 #  include "GHOST_SystemCocoa.hh"
-#elif defined(WITH_GHOST_ANDROID)
-#  include "GHOST_SystemAndroid.hh"
 #endif
 
 #include "CLG_log.h"
@@ -45,7 +43,6 @@ bool GHOST_ISystem::use_window_frame_ = true;
 
 GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool background)
 {
-
   /* When GHOST fails to start, report the back-ends that were attempted.
    * A Verbose argument could be supported in printing isn't always desired. */
   struct GHOST_BackendInfo {
@@ -162,11 +159,7 @@ GHOST_TSuccess GHOST_ISystem::createSystem(bool verbose, [[maybe_unused]] bool b
 #elif defined(__APPLE__)
     backends_attempted.push_back({"COCOA"});
     CLOG_INFO(&LOG, "Create Cocoa system");
-    system_ = new GHOST_SystemCocoa();
-#elif defined(WITH_GHOST_ANDROID)
-    backends_attempted.push_back({"ANDROID"});
-    CLOG_INFO(&LOG, "Create Android system");
-    system_ = new GHOST_SystemAndroid();
+    system_ = new GHOST_SystemCocoa(background);
 #endif
 
     if (system_) {

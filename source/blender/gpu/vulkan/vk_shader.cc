@@ -354,7 +354,7 @@ static std::ostream &print_qualifier(std::ostream &os, const Qualifier &qualifie
 static void print_resource(std::ostream &os,
                            const VKDescriptorSet::Location location,
                            const ShaderCreateInfo::Resource &res,
-                           const ShaderCreateInfo &info)
+                           const ShaderCreateInfo & /*info*/)
 {
   os << "layout(binding = " << uint32_t(location);
   if (res.bind_type == ShaderCreateInfo::Resource::BindType::IMAGE) {
@@ -381,14 +381,13 @@ static void print_resource(std::ostream &os,
       os << res.image.name << ";";
       break;
     case ShaderCreateInfo::Resource::BindType::UNIFORM_BUFFER:
-      os << "uniform _" << res.uniformbuf.name.str_no_array() << " { "
-         << info.buffer_typename(res.uniformbuf.type_name, true) << " " << res.uniformbuf.name
-         << "; };";
+      os << "uniform _" << res.uniformbuf.name.str_no_array() << " { " << res.uniformbuf.type_name
+         << " " << res.uniformbuf.name << "; };";
       break;
     case ShaderCreateInfo::Resource::BindType::STORAGE_BUFFER:
       print_qualifier(os, res.storagebuf.qualifiers);
-      os << "buffer _" << res.storagebuf.name.str_no_array() << " { "
-         << info.buffer_typename(res.storagebuf.type_name) << " " << res.storagebuf.name << "; };";
+      os << "buffer _" << res.storagebuf.name.str_no_array() << " { " << res.storagebuf.type_name
+         << " " << res.storagebuf.name << "; };";
       break;
     case ShaderCreateInfo::Resource::BindType::ACCELERATION_STRUCTURE:
       os << "uniform accelerationStructureEXT " << res.acceleration_structure.name << ";";
@@ -433,11 +432,12 @@ inline int get_location_count(const Type &type)
 static void print_interface_as_attributes(std::ostream &os,
                                           const std::string &prefix,
                                           const StageInterfaceInfo &iface,
-                                          int &location)
+                                          int &location,
+                                          const StringRefNull &suffix)
 {
   for (const StageInterfaceInfo::InOut &inout : iface.inouts) {
     os << "layout(location=" << location << ") " << prefix << " " << to_string(inout.interp) << " "
-       << to_string(inout.type) << " " << inout.name << ";\n";
+       << to_string(inout.type) << " " << inout.name << suffix << ";\n";
     location += get_location_count(inout.type);
   }
 }
@@ -471,7 +471,7 @@ static void print_interface(std::ostream &os,
                             const StringRefNull &suffix = "")
 {
   if (iface.instance_name.is_empty()) {
-    print_interface_as_attributes(os, prefix, iface, location);
+    print_interface_as_attributes(os, prefix, iface, location, suffix);
   }
   else {
     print_interface_as_struct(os, prefix, iface, location, suffix);
@@ -518,7 +518,7 @@ void VKShader::init(const shader::ShaderCreateInfo &info, bool /*is_codegen_only
   for (const ShaderCreateInfo::SubpassIn &input : info.subpass_inputs_) {
     max_input_attachment_index_ = max_uu(max_input_attachment_index_, uint32_t(input.index));
   }
-  use_ray_query_ = bool(info.builtins_ & BuiltinBits::RAY_QUERY);
+  use_ray_query_ = bool(info.builtins_combined() & BuiltinBits::RAY_QUERY);
 }
 
 VKShader::~VKShader()
@@ -640,12 +640,6 @@ bool VKShader::finalize_post(Span<PipelineState> pipeline_states)
   if (is_compute_shader_) {
     /* This is only done for the first shader compilation (not specialization).
      * Give the default constants. */
-    /* The result is deliberately not folded into `result`. A driver can refuse the pipeline for a
-     * shader whose module compiled fine (Qualcomm's Adreno does, for a handful of them), and
-     * reporting that as a failed shader hands every caller a null pointer that EEVEE and the draw
-     * manager do not expect — they crash on the first `GPU_shader_get_*` that follows. The pool
-     * substitutes a do-nothing pipeline in that case, so the shader stays usable and only its
-     * output is missing. */
     ensure_and_get_compute_pipeline(*constants);
   }
   else {
@@ -869,9 +863,12 @@ std::string VKShader::resources_declare(const shader::ShaderCreateInfo &info) co
 
 std::string VKShader::vertex_interface_declare(const shader::ShaderCreateInfo &info) const
 {
-  const VKExtensions &vk_extensions = VKBackend::get().device.extensions_get();
   std::stringstream ss;
+  std::string pre_main;
   std::string post_main;
+
+  const VKExtensions &extensions = VKBackend::get().device.extensions_get();
+  bool uses_clip_distances = flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_DISTANCES);
 
   /* Inputs. */
   for (const ShaderCreateInfo::VertIn &attr : info.vertex_inputs_) {
@@ -884,10 +881,17 @@ std::string VKShader::vertex_interface_declare(const shader::ShaderCreateInfo &i
     print_interface(ss, "out", *iface, location);
   }
 
+  if (uses_clip_distances && !extensions.shader_clip_distance) {
+    ss << "layout(location=" << location << ") out float vk_ClipDistance[6];\n";
+    pre_main += "#define gl_ClipDistance vk_ClipDistance\n";
+    location += 6;
+  }
+
   const bool has_geometry_stage = do_geometry_shader_injection(&info) ||
                                   !info.geometry_source_.is_empty();
-  const bool do_layer_output = flag_is_set(info.builtins_, BuiltinBits::LAYER);
-  const bool do_viewport_output = flag_is_set(info.builtins_, BuiltinBits::VIEWPORT_INDEX);
+  const bool do_layer_output = flag_is_set(info.builtins_combined(), BuiltinBits::LAYER);
+  const bool do_viewport_output = flag_is_set(info.builtins_combined(),
+                                              BuiltinBits::VIEWPORT_INDEX);
   if (has_geometry_stage) {
     if (do_layer_output) {
       ss << "layout(location=" << (location++) << ") out int gpu_Layer;\n ";
@@ -901,15 +905,7 @@ std::string VKShader::vertex_interface_declare(const shader::ShaderCreateInfo &i
       ss << "#define gpu_Layer gl_Layer\n";
     }
     if (do_viewport_output) {
-      /* Aliasing to gl_ViewportIndex declares the MultiViewport capability, which is invalid
-       * without the feature. Such devices expose a single viewport, so keep the name defined
-       * and let the writes go nowhere. */
-      if (vk_extensions.multi_viewport) {
-        ss << "#define gpu_ViewportIndex gl_ViewportIndex\n";
-      }
-      else {
-        ss << "int gpu_ViewportIndex;\n";
-      }
+      ss << "#define gpu_ViewportIndex gl_ViewportIndex\n";
     }
   }
   ss << "\n";
@@ -921,8 +917,7 @@ std::string VKShader::vertex_interface_declare(const shader::ShaderCreateInfo &i
     post_main += "gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
   }
 
-  if (post_main.empty() == false) {
-    std::string pre_main;
+  if (!pre_main.empty() || !post_main.empty()) {
     ss << main_function_wrapper(pre_main, post_main);
   }
   return ss.str();
@@ -980,29 +975,36 @@ std::string VKShader::fragment_interface_declare(const shader::ShaderCreateInfo 
   std::stringstream ss;
   std::string pre_main;
   const VKExtensions &extensions = VKBackend::get().device.extensions_get();
+  bool uses_clip_distances = flag_is_set(info.builtins_combined(), BuiltinBits::CLIP_DISTANCES);
+
+  if (uses_clip_distances && !extensions.shader_clip_distance) {
+    pre_main += "  for (int i = 0; i < 6; i++) {\n";
+    pre_main += "    if (vk_ClipDistance[i] < 0.0) { discard; }\n";
+    pre_main += "  }\n";
+  }
 
   /* Interfaces. */
-  const Span<StageInterfaceInfo *> in_interfaces = info.geometry_source_.is_empty() ?
-                                                       info.vertex_out_interfaces_ :
-                                                       info.geometry_out_interfaces_;
+  const Span<ShaderCreateInfo::StageInterfaceInfoHandle> in_interfaces =
+      info.geometry_source_.is_empty() ? info.vertex_out_interfaces_ :
+                                         info.geometry_out_interfaces_;
   int location = 0;
   for (const StageInterfaceInfo *iface : in_interfaces) {
     print_interface(ss, "in", *iface, location);
   }
-  if (flag_is_set(info.builtins_, BuiltinBits::LAYER)) {
+  if (uses_clip_distances && !extensions.shader_clip_distance) {
+    ss << "layout(location=" << location << ") in float vk_ClipDistance[6];\n";
+    location += 6;
+  }
+
+  if (flag_is_set(info.builtins_combined(), BuiltinBits::LAYER)) {
     ss << "#define gpu_Layer gl_Layer\n";
   }
-  if (flag_is_set(info.builtins_, BuiltinBits::VIEWPORT_INDEX)) {
-    if (extensions.multi_viewport) {
-      ss << "#define gpu_ViewportIndex gl_ViewportIndex\n";
-    }
-    else {
-      ss << "int gpu_ViewportIndex;\n";
-    }
+  if (flag_is_set(info.builtins_combined(), BuiltinBits::VIEWPORT_INDEX)) {
+    ss << "#define gpu_ViewportIndex gl_ViewportIndex\n";
   }
 
   if (!extensions.fragment_shader_barycentric &&
-      flag_is_set(info.builtins_, BuiltinBits::BARYCENTRIC_COORD))
+      flag_is_set(info.builtins_combined(), BuiltinBits::BARYCENTRIC_COORD))
   {
     ss << "layout(location=" << (location++) << ") smooth in vec3 gpu_BaryCoord;\n";
     ss << "layout(location=" << (location++) << ") noperspective in vec3 gpu_BaryCoordNoPersp;\n";
@@ -1067,7 +1069,7 @@ std::string VKShader::fragment_interface_declare(const shader::ShaderCreateInfo 
 
       /* IMPORTANT: We assume that the frame-buffer will be layered or not based on the layer
        * built-in flag. */
-      bool is_layered_fb = flag_is_set(info.builtins_, BuiltinBits::LAYER);
+      bool is_layered_fb = flag_is_set(info.builtins_combined(), BuiltinBits::LAYER);
       bool is_layered_input = ELEM(
           input.img_type, ImageType::Uint2DArray, ImageType::Int2DArray, ImageType::Float2DArray);
       /* Declare image. */
@@ -1076,7 +1078,6 @@ std::string VKShader::fragment_interface_declare(const shader::ShaderCreateInfo 
        * collide with other resources. */
       Resource res(info, Resource::BindType::SAMPLER, input.index, nullptr);
       res.sampler.type = input.img_type;
-      res.sampler.sampler = GPUSamplerState::default_sampler();
       res.sampler.name = image_name;
       print_resource(ss, interface, res, info);
 
@@ -1126,7 +1127,26 @@ std::string VKShader::fragment_interface_declare(const shader::ShaderCreateInfo 
   return ss.str();
 }
 
-std::string VKShader::geometry_interface_declare(const shader::ShaderCreateInfo &info) const
+static StageInterfaceInfo *find_interface_by_name(
+    const Span<ShaderCreateInfo::StageInterfaceInfoHandle> ifaces, const StringRefNull name)
+{
+  for (auto [iface, cond] : ifaces) {
+    if (iface->instance_name == name) {
+      return iface;
+    }
+  }
+  return nullptr;
+}
+
+static void declare_emit_vertex(std::stringstream &ss)
+{
+  ss << "void gpu_EmitVertex() {\n";
+  ss << "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
+  ss << "  EmitVertex();\n";
+  ss << "}\n";
+}
+
+std::string VKShader::geometry_layout_declare(const shader::ShaderCreateInfo &info) const
 {
   int max_verts = info.geometry_layout_.max_vertices;
   int invocations = info.geometry_layout_.invocations;
@@ -1145,26 +1165,7 @@ std::string VKShader::geometry_interface_declare(const shader::ShaderCreateInfo 
   return ss.str();
 }
 
-static StageInterfaceInfo *find_interface_by_name(const Span<StageInterfaceInfo *> ifaces,
-                                                  const StringRefNull name)
-{
-  for (StageInterfaceInfo *iface : ifaces) {
-    if (iface->instance_name == name) {
-      return iface;
-    }
-  }
-  return nullptr;
-}
-
-static void declare_emit_vertex(std::stringstream &ss)
-{
-  ss << "void gpu_EmitVertex() {\n";
-  ss << "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
-  ss << "  EmitVertex();\n";
-  ss << "}\n";
-}
-
-std::string VKShader::geometry_layout_declare(const shader::ShaderCreateInfo &info) const
+std::string VKShader::geometry_interface_declare(const shader::ShaderCreateInfo &info) const
 {
   std::stringstream ss;
 
@@ -1216,10 +1217,11 @@ std::string VKShader::workaround_geometry_shader_source_create(
   std::stringstream ss;
   const VKExtensions &extensions = VKBackend::get().device.extensions_get();
 
-  const bool do_layer_output = flag_is_set(info.builtins_, BuiltinBits::LAYER);
-  const bool do_viewport_output = flag_is_set(info.builtins_, BuiltinBits::VIEWPORT_INDEX);
+  const bool do_layer_output = flag_is_set(info.builtins_combined(), BuiltinBits::LAYER);
+  const bool do_viewport_output = flag_is_set(info.builtins_combined(),
+                                              BuiltinBits::VIEWPORT_INDEX);
   const bool do_barycentric_workaround = !extensions.fragment_shader_barycentric &&
-                                         flag_is_set(info.builtins_,
+                                         flag_is_set(info.builtins_combined(),
                                                      BuiltinBits::BARYCENTRIC_COORD);
 
   shader::ShaderCreateInfo info_modified = info;
@@ -1258,9 +1260,22 @@ std::string VKShader::workaround_geometry_shader_source_create(
   ss << "{\n";
   for (int i : IndexRange(3)) {
     for (const StageInterfaceInfo *iface : info_modified.vertex_out_interfaces_) {
-      for (const StageInterfaceInfo::InOut &inout : iface->inouts) {
-        ss << "  " << iface->instance_name << "_out." << inout.name;
-        ss << " = " << iface->instance_name << "_in[" << i << "]." << inout.name << ";\n";
+      bool has_matching_output_iface = find_interface_by_name(
+                                           info_modified.geometry_out_interfaces_,
+                                           iface->instance_name) != nullptr;
+      const char *out_suffix = (has_matching_output_iface) ? "_out" : "";
+      const char *in_suffix = (has_matching_output_iface) ? "_in" : "";
+      if (iface->instance_name.is_empty()) {
+        for (const StageInterfaceInfo::InOut &inout : iface->inouts) {
+          ss << inout.name << out_suffix << " = " << inout.name << in_suffix << "[" << i << "];\n";
+        }
+      }
+      else {
+        for (const StageInterfaceInfo::InOut &inout : iface->inouts) {
+          ss << "  " << iface->instance_name << out_suffix << "." << inout.name;
+          ss << " = " << iface->instance_name << in_suffix << "[" << i << "]." << inout.name
+             << ";\n";
+        }
       }
     }
     if (do_barycentric_workaround) {
@@ -1271,7 +1286,7 @@ std::string VKShader::workaround_geometry_shader_source_create(
     if (do_layer_output) {
       ss << "  gl_Layer = gpu_Layer[" << i << "];\n";
     }
-    if (do_viewport_output && extensions.multi_viewport) {
+    if (do_viewport_output) {
       ss << "  gl_ViewportIndex = gpu_ViewportIndex[" << i << "];\n";
     }
     ss << "  gpu_EmitVertex();\n";
@@ -1283,19 +1298,18 @@ std::string VKShader::workaround_geometry_shader_source_create(
 bool VKShader::do_geometry_shader_injection(const shader::ShaderCreateInfo *info) const
 {
   const VKExtensions &extensions = VKBackend::get().device.extensions_get();
-  BuiltinBits builtins = info->builtins_;
+  BuiltinBits builtins = info->builtins_combined();
   if (!extensions.fragment_shader_barycentric &&
       flag_is_set(builtins, BuiltinBits::BARYCENTRIC_COORD))
   {
     return true;
   }
-  if (!extensions.shader_output_layer && flag_is_set(builtins, BuiltinBits::LAYER)) {
-    return true;
-  }
-  if (!extensions.shader_output_viewport_index &&
+  if (flag_is_set(builtins, BuiltinBits::LAYER) ||
       flag_is_set(builtins, BuiltinBits::VIEWPORT_INDEX))
   {
-    return true;
+    if (!extensions.shader_viewport_index_layer) {
+      return true;
+    }
   }
   return false;
 }
@@ -1377,6 +1391,8 @@ bool VKShader::ensure_graphics_pipelines(Span<shader::PipelineState> pipeline_st
       graphics_info.fragment_out.color_attachment_formats.append(to_vk_format(color_format));
     }
     graphics_info.fragment_out.state = pipeline_state.state_;
+    graphics_info.shaders.color_attachment_count = uint32_t(
+        graphics_info.fragment_out.color_attachment_formats.size());
 
     bool pipeline_created = false;
     VkPipeline vk_pipeline = device.pipelines.get_or_create_graphics_pipeline(
@@ -1431,6 +1447,10 @@ VkPipeline VKShader::ensure_and_get_graphics_pipeline(
   graphics_info.shaders.vk_topology = vk_topology;
   graphics_info.shaders.state = state_manager.state;
   graphics_info.shaders.viewport_count = framebuffer.viewport_size();
+  if (device.workarounds_get().static_viewport_scissor) {
+    framebuffer.vk_viewports_append(graphics_info.shaders.viewports);
+    framebuffer.vk_render_areas_append(graphics_info.shaders.scissors);
+  }
   graphics_info.shaders.specialization_constants.extend(constants_state.values);
   graphics_info.shaders.has_depth = depth_attachment_format != VK_FORMAT_UNDEFINED;
   graphics_info.shaders.has_stencil = stencil_attachment_format != VK_FORMAT_UNDEFINED;
@@ -1449,6 +1469,8 @@ VkPipeline VKShader::ensure_and_get_graphics_pipeline(
   graphics_info.fragment_out.color_attachment_formats.extend(
       framebuffer.color_attachment_formats_get());
   graphics_info.fragment_out.state = graphics_info.shaders.state;
+  graphics_info.shaders.color_attachment_count = uint32_t(
+      graphics_info.fragment_out.color_attachment_formats.size());
 
   bool pipeline_created = false;
   VkPipeline vk_pipeline = device.pipelines.get_or_create_graphics_pipeline(

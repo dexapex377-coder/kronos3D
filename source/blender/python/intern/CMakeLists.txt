@@ -165,16 +165,7 @@ endif()
 # Without this, the absolute path on the builder is used, causing HTTPS access to fail.
 # For example `urllib.request.urlopen("https://projects.blender.org")` fails
 # (or any other HTTPS site). see: #102300 for details.
-# NOTE: that this isn't necessary on WIN32.
-#
-# Android ships its own portable Python payload, extracted from the APK at
-# runtime, instead of going through Blender's install step, so
-# WITH_PYTHON_INSTALL is off there while the bundle is every bit as portable.
-# It needs this more than any desktop build does: the OpenSSL it links was
-# cross-compiled, so its built-in certificate directory points at a path on the
-# build machine that cannot exist on a phone.
-if(WITH_PYTHON AND (NOT WIN32) AND
-   ((WITH_PYTHON_INSTALL AND (APPLE OR WITH_INSTALL_PORTABLE)) OR ANDROID))
+if(WITH_PYTHON AND WITH_PYTHON_INSTALL AND WITH_INSTALL_PORTABLE)
   # - `PYTHON_SSL_CERT_FILE` absolute path to the PEM file.
   find_python_module_file("certifi/cacert.pem" PYTHON_SSL_CERT_FILE _python_ssl_cert_file_relative)
   mark_as_advanced(PYTHON_SSL_CERT_FILE)
@@ -225,8 +216,8 @@ if(WITH_CYCLES_OSL)
   add_definitions(-DWITH_CYCLES_OSL)
 endif()
 
-if(WITH_CYCLES_EMBREE)
-  add_definitions(-DWITH_CYCLES_EMBREE)
+if(WITH_EMBREE)
+  add_definitions(-DWITH_EMBREE)
 endif()
 
 if(WITH_FREESTYLE)
@@ -307,6 +298,10 @@ if(WITH_IO_PLY)
   add_definitions(-DWITH_IO_PLY)
 endif()
 
+if(WITH_IO_SPZ)
+  add_definitions(-DWITH_IO_SPZ)
+endif()
+
 if(WITH_IO_STL)
   add_definitions(-DWITH_IO_STL)
 endif()
@@ -358,6 +353,10 @@ if(WITH_HYDRA)
     bf_render_hydra
   )
   add_definitions(-DWITH_HYDRA)
+endif()
+
+if(WITH_OPENTIMELINEIO)
+  add_definitions(-DWITH_OPENTIMELINEIO)
 endif()
 
 if(WITH_EXPERIMENTAL_FEATURES)

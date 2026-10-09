@@ -12,13 +12,8 @@
 #include "GHOST_ISystem.hh"
 #include "GHOST_SystemAndroid.hh"
 
-#include "BLI_threads.hh"
-#include "GPU_context.hh"
-
-#include <android/keycodes.h>
 #include <android/log.h>
 #include <android_native_app_glue.h>
-#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <jni.h>
@@ -68,27 +63,11 @@ void WM_main_loop_body(bContext *C);
 static blender::bContext *g_context = nullptr;
 static bool g_blender_launched = false;
 
-/* The GPU context that the window was created with. `GPU_context_create()` runs on the
- * init thread and calls `GPU_context_active_set()` there, but the backend's active
- * context is a `thread_local` (gpu_context.cc: `static thread_local Context *active_ctx`).
- * This thread therefore starts with a null active context, and the first draw that
- * needs it dereferences null inside `VKContext::get()`. Publish it so the loop can
- * adopt it on its own thread before drawing. */
-static blender::GPUContext *g_gpu_context = nullptr;
-
 namespace blender {
-/* Called by the creator once init finished, to hand the context to the loop.
- *
- * Both `g_context` and `g_gpu_context` are read by `android_main` on the glue
- * thread while the creator writes them on `ghost_android_launch_thread`, so they
- * need release/acquire semantics: without it the loop can observe a half-published
- * pair (context visible, GPU context not) and draw against a null backend. */
-void GHOST_androidfinalize(bContext *C, blender::GPUContext *gpu_ctx)
+/* Called by the creator once init finished, to hand the context to the loop. */
+void GHOST_androidfinalize(bContext *C)
 {
-  std::atomic_thread_fence(std::memory_order_release);
-  g_gpu_context = gpu_ctx;
   g_context = C;
-  std::atomic_thread_fence(std::memory_order_release);
 }
 }  // namespace blender
 
@@ -102,34 +81,24 @@ static GHOST_SystemAndroid *android_system()
 static std::vector<std::string> ghost_android_read_launch_args(android_app *app)
 {
   std::vector<std::string> args;
-  if (app == nullptr || app->activity == nullptr) {
+  if (app == nullptr || app->activity == nullptr || app->activity->internalDataPath == nullptr) {
     return args;
   }
-  /* Internal first, then external. The external path lives on /sdcard and lets
-   * us inject launch tweaks (e.g. --debug-value for Eevee debug views) without
-   * root or a debuggable build: just write blender_args.txt there and restart. */
-  const char *data_paths[] = {app->activity->internalDataPath, app->activity->externalDataPath};
-  for (const char *data_path : data_paths) {
-    if (data_path == nullptr) {
-      continue;
-    }
-    const std::string path = std::string(data_path) + "/blender_args.txt";
-    FILE *file = fopen(path.c_str(), "r");
-    if (file == nullptr) {
-      continue;
-    }
-    char token[512];
-    while (fscanf(file, "%511s", token) == 1) {
-      args.push_back(token);
-    }
-    fclose(file);
-    __android_log_print(ANDROID_LOG_INFO,
-                        "blender",
-                        "[BlenderAndroid] %zu launch argument(s) from %s",
-                        args.size(),
-                        path.c_str());
-    break;
+  const std::string path = std::string(app->activity->internalDataPath) + "/blender_args.txt";
+  FILE *file = fopen(path.c_str(), "r");
+  if (file == nullptr) {
+    return args;
   }
+  char token[512];
+  while (fscanf(file, "%511s", token) == 1) {
+    args.push_back(token);
+  }
+  fclose(file);
+  __android_log_print(ANDROID_LOG_INFO,
+                      "blender",
+                      "[BlenderAndroid] %zu launch argument(s) from %s",
+                      args.size(),
+                      path.c_str());
   return args;
 }
 
@@ -258,18 +227,54 @@ extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOn
   }
 }
 
-/* One key stroke from the shortcuts panel: a modifier keycode (or 0 for none), the
- * key itself, and the meta state to advertise while it is held.
- *
- * The modifiers go out as their own real key events rather than only as meta bits,
- * because Blender's keymap is evaluated from GHOST_EventManager's view of which
- * modifier keys are down. Packing the modifier into meta_state alone leaves that view
- * stale, and the panel's shortcuts then resolve to whatever is bound without it.
- *
- * Order matters: modifier down, key down, key up, modifier up. The final modifier
- * release carries meta 0, which also clears GHOST_SystemAndroid::meta_state_ so the
- * next shortcut does not inherit it.
- */
+/* A .blend tapped in a file manager while Blender is already running, forwarded from
+ * BlenderActivity.onNewIntent on the Android UI thread. */
+extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOpenMainFile(
+    JNIEnv *env, jobject /*thiz*/, jstring path)
+{
+  GHOST_SystemAndroid *system = android_system_if_ready();
+  if (!system || !path) {
+    return;
+  }
+  const char *utf = env->GetStringUTFChars(path, nullptr);
+  system->handleOpenMainFile(utf);
+  env->ReleaseStringUTFChars(path, utf);
+}
+
+extern "C" void android_main(struct android_app *app)
+{
+  ghost_android_redirect_stdio();
+  GHOST_SystemAndroid::setAndroidApp(app);
+  app->onAppCmd = on_app_cmd;
+  app->onInputEvent = on_input_event;
+
+  while (!app->destroyRequested) {
+    int events;
+    android_poll_source *source;
+    /* Block until the window exists (and Blender is launched); afterwards never
+     * block, so we fall through to render every frame. `GHOST_android_launch`
+     * runs the whole init inside `source->process` and sets `g_context`
+     * mid-drain, so the timeout must be re-evaluated after each event rather
+     * than captured once — otherwise the loop blocks forever and never renders. */
+    int timeout = g_context ? 0 : -1;
+    while (ALooper_pollOnce(timeout, nullptr, &events, (void **)&source) >= 0) {
+      if (source) {
+        source->process(app, source);
+      }
+      if (app->destroyRequested) {
+        return;
+      }
+      if (g_context) {
+        timeout = 0;
+      }
+    }
+
+    if (g_context) {
+      blender::WM_main_loop_body(g_context);
+    }
+  }
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSendKeyCombo(
     JNIEnv * /*env*/, jobject /*thiz*/, jint modifier_mask, jint keycode, jint meta_state)
 {
@@ -331,92 +336,3 @@ extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeSe
                             pressed ? meta_state : 0);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_kronos3d_app_BlenderActivity_nativeOpenMainFile(
-    JNIEnv *env, jobject /*thiz*/, jstring path)
-{
-  GHOST_SystemAndroid *system = android_system_if_ready();
-  if (!system || !path) {
-    return;
-  }
-  const char *utf = env->GetStringUTFChars(path, nullptr);
-  system->handleOpenMainFile(utf);
-  env->ReleaseStringUTFChars(path, utf);
-}
-
-extern "C" void android_main(struct android_app *app)
-{
-  /* Claim Blender's "main thread" here, before anything else runs.
-   *
-   * BLI_threadapi_init() records the calling thread in `mainid`, and
-   * BLI_thread_is_main() compares against it. ctx_wm_python_context_get() ends
-   * with `if (!BLI_thread_is_main()) return nullptr;`, so every CTX_wm_window()
-   * / _workspace() / _screen() / _area() / _region() on a thread that is not
-   * `mainid` answers null rather than the real pointer.
-   *
-   * That guard is upstream and correct, and this port used to break it: init
-   * runs on `ghost_android_launch_thread` (spawned in on_app_cmd), so
-   * blender_main()'s BLI_threadapi_init() recorded *that* thread, while
-   * WM_main_loop_body runs here on the glue thread. The main loop therefore
-   * saw a null context window on every frame, and the first tap dereferenced
-   * it: ED_workspace_do_listen() reading CTX_wm_workspace(C) faulted at
-   * +0x208, and handle_menu_event() faulted on win->cursor.
-   *
-   * This thread is the right one to own it: it pumps the ALooper and runs
-   * WM_main_loop_body for the life of the process. The launch thread is a
-   * one-shot worker for init, and creator.cc skips its BLI_threadapi_init() on
-   * Android so it cannot take the claim back.
-   *
-   * ANativeActivity_onCreate() is itself not the process main thread (that is
-   * the JVM's), so the process main thread was never the right answer either. */
-  blender::BLI_threadapi_init();
-
-  ghost_android_redirect_stdio();
-  GHOST_SystemAndroid::setAndroidApp(app);
-  app->onAppCmd = on_app_cmd;
-  app->onInputEvent = on_input_event;
-
-  bool gpu_context_adopted = false;
-
-  while (!app->destroyRequested) {
-    int events;
-    android_poll_source *source;
-    /* Block until the window exists (and Blender is launched); afterwards never
-     * block, so we fall through to render every frame. `GHOST_android_launch`
-     * runs the whole init inside `source->process` and sets `g_context`
-     * mid-drain, so the timeout must be re-evaluated after each event rather
-     * than captured once — otherwise the loop blocks forever and never renders. */
-    int timeout = g_context ? 0 : -1;
-    while (ALooper_pollOnce(timeout, nullptr, &events, (void **)&source) >= 0) {
-      if (source) {
-        source->process(app, source);
-      }
-      if (app->destroyRequested) {
-        return;
-      }
-      if (g_context) {
-        timeout = 0;
-      }
-    }
-
-    /* Adopt the GPU context on *this* thread before the first draw.
-     *
-     * The backend tracks the active context in a `thread_local active_ctx`, and
-     * `GPU_context_create()` only set it on the init thread. Without this, the
-     * first `wm_draw_update()` that reaches the swap chain runs the
-     * `swapBufferAcquire` callback, whose `VKContext::get()` resolves to null and
-     * dereferences it in `sync_backbuffer()` — a SIGSEGV at fault address 0x130,
-     * after exactly one successful frame had already been submitted (hence the
-     * black screen, then a crash on the first redraw). Setting it here mirrors
-     * what `WM_init` did on the init thread, so the loop thread is the one that
-     * owns the context it draws with. */
-    if (g_context && g_gpu_context && !gpu_context_adopted) {
-      std::atomic_thread_fence(std::memory_order_acquire);
-      blender::GPU_context_active_set(g_gpu_context);
-      gpu_context_adopted = true;
-    }
-
-    if (g_context) {
-      blender::WM_main_loop_body(g_context);
-    }
-  }
-}

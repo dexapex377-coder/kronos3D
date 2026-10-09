@@ -15,7 +15,6 @@
 #include "vk_backend.hh"
 #include "vk_context.hh"
 #include "vk_device.hh"
-#include "vk_pipeline_diag.hh"
 #include "vk_state_manager.hh"
 #include "vk_storage_buffer.hh"
 #include "vk_texture.hh"
@@ -38,13 +37,11 @@ void VKExtensions::log() const
 {
   CLOG_DEBUG(&LOG,
              "Device features\n"
-             " - [%c] shader output viewport index\n"
-             " - [%c] shader output layer\n"
              " - [%c] fragment shader barycentric\n"
              " - [%c] wide lines\n"
+             " - [%c] multi draw indirect\n"
+             " - [%c] shader clip distance\n"
              "Device extensions\n"
-             " - [%c] dynamic rendering\n"
-             " - [%c] provoking vertex\n"
              " - [%c] dynamic rendering local read\n"
              " - [%c] dynamic rendering unused attachments\n"
              " - [%c] extended dynamic state\n"
@@ -55,15 +52,17 @@ void VKExtensions::log() const
              " - [%c] maintenance4\n"
              " - [%c] memory priority\n"
              " - [%c] pageable device local memory\n"
+             " - [%c] provoking vertex\n"
              " - [%c] shader stencil export\n"
+             " - [%c] shader output viewport index and layer\n"
+             " - [%c] spirv 1.4\n"
              " - [%c] ray queries\n"
-             " - [%c] vertex input dynamic state",
-             shader_output_viewport_index ? 'X' : ' ',
-             shader_output_layer ? 'X' : ' ',
+             " - [%c] vertex input dynamic state\n"
+             " - [%c] vertex pipeline stores and atomics",
              fragment_shader_barycentric ? 'X' : ' ',
              wide_lines ? 'X' : ' ',
-             dynamic_rendering ? 'X' : ' ',
-             provoking_vertex ? 'X' : ' ',
+             multi_draw_indirect ? 'X' : ' ',
+             shader_clip_distance ? 'X' : ' ',
              dynamic_rendering_local_read ? 'X' : ' ',
              dynamic_rendering_unused_attachments ? 'X' : ' ',
              extended_dynamic_state ? 'X' : ' ',
@@ -74,9 +73,13 @@ void VKExtensions::log() const
              maintenance4 ? 'X' : ' ',
              memory_priority ? 'X' : ' ',
              pageable_device_local_memory ? 'X' : ' ',
+             provoking_vertex ? 'X' : ' ',
              GPU_stencil_export_support() ? 'X' : ' ',
+             shader_viewport_index_layer ? 'X' : ' ',
+             spirv_1_4 ? 'X' : ' ',
              GPU_ray_query_support() ? 'X' : ' ',
-             vertex_input_dynamic_state ? 'X' : ' ');
+             vertex_input_dynamic_state ? 'X' : ' ',
+             GPU_vertex_pipeline_stores_and_atomics_support() ? 'X' : ' ');
 }
 
 void VKWorkarounds::log() const
@@ -84,8 +87,10 @@ void VKWorkarounds::log() const
   CLOG_DEBUG(&LOG,
              "Activated workarounds\n"
              " - [%c] Not 16/32 bit aligned image formats\n"
+             " - [%c] Static viewport & scissor state\n"
              " - [%c] No texture pool",
              not_aligned_pixel_formats ? 'X' : ' ',
+             static_viewport_scissor ? 'X' : ' ',
              GCaps.texture_pool_workaround ? 'X' : ' ');
 }
 
@@ -118,7 +123,6 @@ void VKDevice::deinit()
   }
   pipelines.write_to_disk();
   pipelines.free_data(*this);
-  render_pass_fallback.deinit();
   descriptor_set_layouts_.deinit();
   vma_pools.deinit(*this);
   mem_allocator_ = VK_NULL_HANDLE;
@@ -158,23 +162,6 @@ void VKDevice::init(GHOST_IContext *ghost_context)
 
   volkLoadDeviceTable(&functions, vk_device_);
 
-  /* On Vulkan 1.1 devices, functions promoted to 1.2/1.3 core are only available
-   * under their *KHR names (via the enabled extension). The rest of the backend
-   * calls the core names, so alias any null core pointer to its KHR twin. */
-#define VK_ALIAS_CORE_KHR(fn) \
-  if (functions.fn == nullptr) { \
-    functions.fn = functions.fn##KHR; \
-  }
-  VK_ALIAS_CORE_KHR(vkGetSemaphoreCounterValue);
-  VK_ALIAS_CORE_KHR(vkWaitSemaphores);
-  VK_ALIAS_CORE_KHR(vkSignalSemaphore);
-  VK_ALIAS_CORE_KHR(vkGetBufferDeviceAddress);
-  VK_ALIAS_CORE_KHR(vkGetBufferOpaqueCaptureAddress);
-  VK_ALIAS_CORE_KHR(vkGetDeviceMemoryOpaqueCaptureAddress);
-  VK_ALIAS_CORE_KHR(vkCmdBeginRendering);
-  VK_ALIAS_CORE_KHR(vkCmdEndRendering);
-#undef VK_ALIAS_CORE_KHR
-
   init_physical_device_extensions();
   init_physical_device_properties();
   init_physical_device_memory_properties();
@@ -193,9 +180,6 @@ void VKDevice::init(GHOST_IContext *ghost_context)
   debug::object_label(vk_queue_, "GenericQueue");
 
   resources.use_dynamic_rendering_local_read = extensions_.dynamic_rendering_local_read;
-  if (!extensions_.dynamic_rendering) {
-    render_pass_fallback.init(vk_handle(), functions);
-  }
   orphaned_data.timeline_ = 0;
 
   init_submission_thread();
@@ -205,17 +189,6 @@ void VKDevice::init(GHOST_IContext *ghost_context)
 void VKDevice::init_debug_callbacks()
 {
   debugging_tools_.init(vk_instance_);
-}
-
-bool VKDevice::format_supports_linear_filter(VkFormat vk_format) const
-{
-  std::scoped_lock lock(format_linear_filter_mutex_);
-  return format_linear_filter_support_.lookup_or_add_cb(vk_format, [&]() {
-    VkFormatProperties properties = {};
-    vkGetPhysicalDeviceFormatProperties(vk_physical_device_, vk_format, &properties);
-    return (properties.optimalTilingFeatures &
-            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
-  });
 }
 
 void VKDevice::init_physical_device_properties()
@@ -229,9 +202,6 @@ void VKDevice::init_physical_device_properties()
   vk_physical_device_id_properties_.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
   vk_physical_device_properties.pNext = &vk_physical_device_driver_properties_;
   vk_physical_device_driver_properties_.pNext = &vk_physical_device_id_properties_;
-  vk_physical_device_subgroup_properties_.sType =
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-  vk_physical_device_id_properties_.pNext = &vk_physical_device_subgroup_properties_;
 
   if (supports_extension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME)) {
     vk_physical_device_maintenance4_properties_.pNext = vk_physical_device_properties.pNext;
@@ -252,74 +222,6 @@ void VKDevice::init_physical_device_properties()
 
   vkGetPhysicalDeviceProperties2(vk_physical_device_, &vk_physical_device_properties);
   vk_physical_device_properties_ = vk_physical_device_properties.properties;
-
-  const VkPhysicalDeviceLimits &limits = vk_physical_device_properties_.limits;
-  vk_pipeline_diag_logf(
-      "DEVICE %s | vendor=0x%x | device=0x%x | driver=0x%x | api=%u.%u.%u | name=%s",
-      vk_physical_device_driver_properties_.driverName,
-      vk_physical_device_properties_.vendorID,
-      vk_physical_device_properties_.deviceID,
-      vk_physical_device_properties_.driverVersion,
-      VK_VERSION_MAJOR(vk_physical_device_properties_.apiVersion),
-      VK_VERSION_MINOR(vk_physical_device_properties_.apiVersion),
-      VK_VERSION_PATCH(vk_physical_device_properties_.apiVersion),
-      vk_physical_device_properties_.deviceName);
-  vk_pipeline_diag_logf(
-      "DEVICE-LIMITS | maxComputeWorkGroupInvocations=%u | maxComputeWorkGroupSize=(%u,%u,%u) | "
-      "maxComputeWorkGroupCount=(%u,%u,%u) | maxComputeSharedMemorySize=%u | "
-      "subgroupSize=%u | maxStorageBufferRange=%zu",
-      limits.maxComputeWorkGroupInvocations,
-      limits.maxComputeWorkGroupSize[0],
-      limits.maxComputeWorkGroupSize[1],
-      limits.maxComputeWorkGroupSize[2],
-      limits.maxComputeWorkGroupCount[0],
-      limits.maxComputeWorkGroupCount[1],
-      limits.maxComputeWorkGroupCount[2],
-      limits.maxComputeSharedMemorySize,
-      vk_physical_device_subgroup_properties_.subgroupSize,
-      size_t(limits.maxStorageBufferRange));
-
-  /* Storage image format support: log which render-target formats accept write access, as a
-   * missing STORAGE_IMAGE_BIT on a format EEVEE uses for compute image stores is a classic
-   * PowerVR "VK_ERROR_UNKNOWN on why no crash tells you nothing" failure. */
-  const VkFormat formats_to_check[] = {
-      VK_FORMAT_R8G8B8A8_UNORM,
-      VK_FORMAT_R8G8B8A8_SNORM,
-      VK_FORMAT_R16G16B16A16_SFLOAT,
-      VK_FORMAT_R16G16B16A16_UNORM,
-      VK_FORMAT_R32G32B32A32_SFLOAT,
-      VK_FORMAT_R32G32B32A32_UINT,
-      VK_FORMAT_R32G32B32_UINT,
-      VK_FORMAT_R32G32B32_SFLOAT,
-      VK_FORMAT_R32G32_SFLOAT,
-      VK_FORMAT_R32G32_UINT,
-      VK_FORMAT_R32_SFLOAT,
-      VK_FORMAT_R16_SFLOAT,
-      VK_FORMAT_R16G16_SFLOAT,
-      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
-      VK_FORMAT_B8G8R8A8_UNORM,
-      VK_FORMAT_R16G16B16A16_USCALED,
-  };
-  char format_log[1024];
-  size_t format_log_len = 0;
-  for (VkFormat vk_format : formats_to_check) {
-    VkFormatProperties props;
-    vkGetPhysicalDeviceFormatProperties(vk_physical_device_, vk_format, &props);
-    const bool storage = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
-    const bool storage_aa = (props.optimalTilingFeatures &
-                             VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) != 0;
-    const bool sampled = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
-    const bool depth = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
-    format_log_len += snprintf(format_log + format_log_len,
-                               sizeof(format_log) - format_log_len,
-                               "%s|%s%s%s%s ",
-                               to_gpu_format_string(vk_format).c_str(),
-                               storage ? "S" : "-",
-                               storage_aa ? "s" : "-",
-                               sampled ? "I" : "-",
-                               depth ? "D" : "-");
-  }
-  vk_pipeline_diag_logf("DEVICE-FORMATS | %s", format_log);
 }
 
 void VKDevice::init_physical_device_memory_properties()
@@ -336,12 +238,9 @@ void VKDevice::init_physical_device_features()
   features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   vk_physical_device_vulkan_11_features_.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-  vk_physical_device_vulkan_12_features_.sType =
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 
   features.pNext = &vk_physical_device_vulkan_11_features_;
-  vk_physical_device_vulkan_11_features_.pNext = &vk_physical_device_vulkan_12_features_;
-  vk_physical_device_vulkan_12_features_.pNext =
+  vk_physical_device_vulkan_11_features_.pNext =
       &vk_physical_device_acceleration_structure_features_;
 
   vkGetPhysicalDeviceFeatures2(vk_physical_device_, &features);
@@ -382,30 +281,27 @@ void VKDevice::init_dummy_buffer()
   dummy_buffer.update_immediately(static_cast<void *>(data));
 }
 
+uint32_t VKDevice::glsl_patch_version_get(bool use_ray_query) const
+{
+  const bool requires_460 = use_ray_query;
+  return requires_460 ? 460u : 450u;
+}
+
 shader::GeneratedSource VKDevice::extensions_define(StringRefNull stage_define,
                                                     bool use_ray_query) const
 {
   std::stringstream ss;
 
-  const bool requires_460 = use_ray_query;
-  if (requires_460) {
-    ss << "#version 460\n";
-  }
-  else {
-    ss << "#version 450\n";
-  }
-  {
-    /* Required extension. */
-    ss << "#extension GL_ARB_shader_draw_parameters : enable\n";
-    ss << "#define GPU_ARB_shader_draw_parameters\n";
-    ss << "#define gpu_BaseInstance (gl_BaseInstanceARB)\n";
-  }
+  ss << "#version " << glsl_patch_version_get(use_ray_query) << "\n";
   ss << "#define GPU_ARB_clip_control\n";
   ss << "#define GPU_ARB_derivative_control\n";
 
   ss << "#define gl_VertexID gl_VertexIndex\n";
+  /* usage of gpu_BaseInstance is deprecated to support more Android devices. Prefer to use
+   * gpu_InstanceIndex. */
+  ss << "#define gpu_BaseInstance (0)\n";
   ss << "#define gpu_InstanceIndex (gl_InstanceIndex)\n";
-  ss << "#define gl_InstanceID (gpu_InstanceIndex - gpu_BaseInstance)\n";
+  ss << "#define gl_InstanceID (gpu_InstanceIndex)\n";
 
   ss << "#extension GL_ARB_shader_viewport_layer_array: enable\n";
   if (GPU_stencil_export_support()) {
@@ -419,6 +315,10 @@ shader::GeneratedSource VKDevice::extensions_define(StringRefNull stage_define,
   }
   if (use_ray_query) {
     ss << "#extension GL_EXT_ray_query : enable\n";
+    ss << "#define GPU_EXT_RAY_QUERY\n";
+  }
+  if (!extensions_.provoking_vertex) {
+    ss << "#define GPU_PROVOKING_VERTEX_LAST\n";
   }
   ss << stage_define;
 
@@ -620,38 +520,6 @@ Span<std::reference_wrapper<VKContext>> VKDevice::contexts_get() const
   return contexts_;
 };
 
-/**
- * Touch: can anything in this process allocate out of this heap?
- *
- * A heap reachable only through protected memory types is for DRM-protected content. Blender never
- * allocates from one, so counting it as memory Blender has is simply wrong. Measured on a
- * Snapdragon 8 Gen 3 (Adreno 750), where the driver reports two device-local heaps:
- *
- *   heap[0] 11084 MiB, flags 0x1
- *   heap[1]  4095 MiB, flags 0x1, reachable only by memoryType[7], propertyFlags 0x21
- *                                 (DEVICE_LOCAL | PROTECTED)
- *
- * Summed, that is the 14.8 GiB the status bar used to report on a phone sold with 12 GB of RAM --
- * a figure larger than the machine has, describing no pool that exists. A discrete card has one
- * device-local heap and no protected one, which is why the sum looked right everywhere else.
- */
-bool VKDevice::memory_heap_is_allocatable(const uint32_t memory_heap_index) const
-{
-  for (const uint32_t type_index :
-       IndexRange(vk_physical_device_memory_properties_.memoryTypeCount))
-  {
-    const VkMemoryType &memory_type =
-        vk_physical_device_memory_properties_.memoryTypes[type_index];
-    if (memory_type.heapIndex != memory_heap_index) {
-      continue;
-    }
-    if (!bool(memory_type.propertyFlags & VK_MEMORY_PROPERTY_PROTECTED_BIT)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 void VKDevice::memory_statistics_get(int *r_total_mem_kb, int *r_free_mem_kb) const
 {
   VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
@@ -669,25 +537,12 @@ void VKDevice::memory_statistics_get(int *r_total_mem_kb, int *r_free_mem_kb) co
       continue;
     }
 
-    /* Touch: and heaps this process cannot allocate from at all. */
-    if (!memory_heap_is_allocatable(memory_heap_index)) {
-      continue;
-    }
-
-    /* Touch: the budget, not the size of the heap.
-     *
-     * VmaBudget::budget is what is actually available to this process -- from
-     * VK_EXT_memory_budget where the driver offers it, and a heuristic otherwise. On a phone the
-     * device-local heap *is* system memory, all of it, shared with Android and every other app,
-     * so its size is not an amount Blender can ever have. The figure asked for here is the memory
-     * available for use, so that is the one reported. */
-    total_mem += budget.budget;
+    total_mem += memory_heap.size;
     used_mem += budget.usage;
   }
 
   *r_total_mem_kb = int(total_mem / 1024);
-  /* Touch: a budget can be reported below what is already in use; do not wrap around. */
-  *r_free_mem_kb = int((total_mem > used_mem ? total_mem - used_mem : 0) / 1024);
+  *r_free_mem_kb = int((total_mem - used_mem) / 1024);
 }
 
 /** \} */

@@ -14,8 +14,6 @@
  * - Links to web sites.
  */
 
-#include <algorithm>
-#include <cfloat>
 #include <cstring>
 
 #include "DNA_screen_types.h"
@@ -289,84 +287,8 @@ static int is_using_macos_rosetta()
 }
 #endif /* __APPLE__ */
 
-/**
- * Touch: how wide the splash and the About box are allowed to be, in pixels.
- *
- * Blender asks for a box 45 em wide and clamps it to a fraction of the window. On a desktop the
- * clamp never bites; on a phone it always did, and that is the whole defect. The clamp moved the
- * box and left the text where it was: 11 pt at UI_SCALE_FAC 1.833 wants 907 px of width, the
- * clamp gave it 756, and the result was a splash whose type was a sixth too large for the space
- * it had -- the rows crowding each other, nothing like the desktop the design came from.
- *
- * Measured on a Galaxy S24 Ultra, 1080x2243 upright. Landscape never clamped: 0.7 of 2244 is
- * 1570, well past what the box asks for, which is why only the upright splash looked wrong.
- *
- * The fraction is higher than upstream's 0.7 on purpose. A phone held upright has width to spare
- * beside a 45 em box and nothing else to spend it on, so the box is allowed to grow into it
- * rather than the type being shrunk to fit a narrower one, and the margins are still wide enough
- * that the artwork does not run to the edges. #wm_splash_fit_factor() handles the case where even
- * this is not enough.
- */
-static float wm_splash_max_width(const wmWindow *win)
-{
-  if (win == nullptr) {
-    return FLT_MAX;
-  }
-  return WM_window_native_pixel_x(win) * 0.86f;
-}
-
-/**
- * Touch: the scale the splash and the About box are drawn at, so the box and its contents agree.
- *
- * Returns 1.0 when the box fits as designed, which is the desktop case and the landscape phone
- * case. When it does not fit, the contents are scaled down by the same fraction the box is,
- * rather than the box alone being squeezed -- which is what produced the cramped upright splash
- * this exists to fix. Everything inside is derived from UI_SCALE_FAC, so scaling that scales the
- * type, the icons and the row spacing together and the proportions are the ones upstream drew.
- *
- * The height is bounded too, by the same factor, so a short window cannot push the artwork off
- * the top and bottom. The block's height is not known until it has been laid out, so it is
- * estimated as a multiple of its width: #SPLASH_HEIGHT_PER_WIDTH, which is the artwork's aspect
- * plus the rows beneath it. Estimating high costs nothing here -- a splash slightly smaller than
- * it had to be -- while estimating low is the bug being prevented.
- */
-static float wm_splash_fit_factor(const bContext *C)
-{
-  const wmWindow *win = CTX_wm_window(C);
-  if (win == nullptr) {
-    return 1.0f;
-  }
-
-  const uiStyle *style = ui::style_get_dpi();
-  const float natural_width = style->widget.points * 45 * UI_SCALE_FAC;
-  if (natural_width <= 0.0f) {
-    return 1.0f;
-  }
-
-  /* The artwork is a little over half as tall as it is wide, and the rows beneath it come to
-   * about two thirds of a width more now they are drawn at the menu pitch.
-   *
-   * Measured from the drawn block rather than derived, because the block is not known until it
-   * has been laid out: 1.02 before the rows were raised, then 1.20 upright and 1.26 turned. The
-   * two disagree by more than rounding -- the rows have minimum heights that do not scale all the
-   * way down -- so the constant is the larger of them with room on top. Estimating high costs a
-   * splash slightly smaller than it had to be; estimating low is the artwork running off the top
-   * of a landscape phone, which is the whole thing being prevented. */
-  constexpr float SPLASH_HEIGHT_PER_WIDTH = 1.32f;
-
-  const float width_limit = wm_splash_max_width(win);
-  const float height_limit = WM_window_native_pixel_y(win) * 0.95f / SPLASH_HEIGHT_PER_WIDTH;
-
-  return std::min(1.0f, std::min(width_limit, height_limit) / natural_width);
-}
-
 static ui::Block *wm_block_splash_create(bContext *C, ARegion *region, void * /*arg*/)
 {
-  /* Touch: the guard comes first, and every size below is read inside it. The factor itself has
-   * to be computed before it, from the unscaled values -- it is the answer to "by how much is
-   * this too big", which cannot be asked once the answer has been applied. */
-  const ScopedMenuScale splash_scale(wm_splash_fit_factor(C));
-
   const uiStyle *style = ui::style_get_dpi();
 
   ui::Block *block = block_begin(C, region, "splash", ui::EmbossType::Emboss);
@@ -378,7 +300,7 @@ static ui::Block *wm_block_splash_create(bContext *C, ARegion *region, void * /*
   block_theme_style_set(block, ui::BLOCK_THEME_STYLE_POPUP);
 
   int splash_width = style->widget.points * 45 * UI_SCALE_FAC;
-  CLAMP_MAX(splash_width, wm_splash_max_width(CTX_wm_window(C)));
+  CLAMP_MAX(splash_width, WM_window_native_pixel_x(CTX_wm_window(C)) * 0.7f);
   int splash_height;
 
   /* Would be nice to support caching this, so it only has to be re-read (and likely resized) on
@@ -421,20 +343,6 @@ static ui::Block *wm_block_splash_create(bContext *C, ARegion *region, void * /*
                                         UI_SCALE_FAC * 110,
                                         0,
                                         style);
-
-  /* Touch: the rows, at the pitch the rest of the interface uses.
-   *
-   * The block itself stays out of the menu scale -- see wm_splash_invoke() -- because it is a
-   * fixed-proportion image and scaling it only pushes the artwork off the screen. Its list is not
-   * artwork though, and left at 1.0 it was the one list in the program drawn tighter than every
-   * menu beside it: measured on the same screen, 40 px per row here against 54 in the top bar
-   * menu, which is what reads as no padding.
-   *
-   * scale_y rather than a scale guard, and that is the point of doing it this way: it gives the
-   * rows their height without touching the type, so the file names in the right-hand column are
-   * no more truncated than they were. A guard would have scaled the text too, inside a box whose
-   * width is already decided, and truncated them further. */
-  layout.scale_y_set(ED_ui_menu_scale());
 
   MenuType *mt;
 
@@ -504,11 +412,7 @@ static wmOperatorStatus wm_splash_invoke(bContext *C,
                                          wmOperator * /*op*/,
                                          const wmEvent * /*event*/)
 {
-  /* Touch: opted out of the menu scale. The splash is a fixed-proportion image whose width is
-   * already clamped to the window but whose height is not, so extra scale does not make it easier
-   * to read -- it pushes the artwork off the top and bottom of a landscape phone. The About box
-   * is the same block laid out the same way. Neither is something a finger aims at. */
-  ui::popup_block_invoke(C, wm_block_splash_create, nullptr, nullptr, nullptr, false);
+  ui::popup_block_invoke(C, wm_block_splash_create, nullptr, nullptr);
 
   return OPERATOR_FINISHED;
 }
@@ -531,13 +435,8 @@ void WM_OT_splash(wmOperatorType *ot)
 
 static ui::Block *wm_block_about_create(bContext *C, ARegion *region, void * /*arg*/)
 {
-  /* Touch: the same fit as the splash; see wm_splash_fit_factor(). This box carried no clamp at
-   * all upstream, so on a narrow enough phone it ran off both sides. */
-  const ScopedMenuScale about_scale(wm_splash_fit_factor(C));
-
   const uiStyle *style = ui::style_get_dpi();
-  int dialog_width = style->widget.points * 42 * UI_SCALE_FAC;
-  CLAMP_MAX(dialog_width, wm_splash_max_width(CTX_wm_window(C)));
+  const int dialog_width = style->widget.points * 42 * UI_SCALE_FAC;
 
   ui::Block *block = block_begin(C, region, "about", ui::EmbossType::Emboss);
 
@@ -579,16 +478,6 @@ static ui::Block *wm_block_about_create(bContext *C, ARegion *region, void * /*a
 
   ui::Layout &col = layout.column(true);
 
-  /* Touch: the same row pitch as the splash and every other menu; see wm_block_splash_create().
-   *
-   * On this column and not on the layout above it, which is the whole point. The logo is added
-   * with uiDefButImage() while that layout is open, so it is a layout item like any other and
-   * scale_y stretched it vertically -- a Blender logo squeezed narrow, which no scale should ever
-   * produce. The splash gets away with scaling its outer layout only because its artwork is
-   * created before the layout exists. Here the text and the buttons live in this column, added
-   * after the logo, so this is where the rows can be raised without touching the artwork. */
-  col.scale_y_set(ED_ui_menu_scale());
-
   uiItemL_ex(&col, IFACE_("Blender"), ICON_NONE, true, false);
 
   MenuType *mt = WM_menutype_find("WM_MT_splash_about", true);
@@ -605,8 +494,7 @@ static wmOperatorStatus wm_splash_about_invoke(bContext *C,
                                                wmOperator * /*op*/,
                                                const wmEvent * /*event*/)
 {
-  /* Touch: not at the menu scale, for the same reason as the splash above. */
-  ui::popup_block_invoke(C, wm_block_about_create, nullptr, nullptr, nullptr, false);
+  ui::popup_block_invoke(C, wm_block_about_create, nullptr, nullptr);
 
   return OPERATOR_FINISHED;
 }

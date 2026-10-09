@@ -77,6 +77,7 @@ struct wmOperator;
 struct wmOperatorType;
 struct wmRegionListenerParams;
 struct wmWindow;
+struct TextboxState;
 namespace ed::asset {
 struct AssetFilterSettings;
 }
@@ -406,6 +407,8 @@ enum ButtonFlag : int64_t {
    * buttons currently.
    */
   BUT_FORCE_SEMI_MODAL_ACTIVE = int64_t(1) << 33,
+  /** On a full Tab auto-complete match, apply the value & keep editing (cursor at the end). */
+  BUT_TEXTEDIT_AUTOCOMPLETE_KEEP_ACTIVE = int64_t(1) << 34,
 };
 
 /** #Button.dragflag */
@@ -443,6 +446,7 @@ enum {
 
 #define UI_PANEL_CATEGORY_MARGIN_WIDTH \
   (((U.uiflag2 & USER_UIFLAG2_PANEL_TABS_COMPACT) ? 1.4f : 1.0f) * U.widget_unit)
+#define UI_PANEL_SEARCH_BLOCK_MARGIN_HEIGHT (1.25f * UI_UNIT_Y)
 
 /* Minimum width for a panel showing only category tabs. */
 #define UI_PANEL_CATEGORY_MIN_WIDTH ((U.uiflag2 & USER_UIFLAG2_PANEL_TABS_COMPACT) ? 32.0f : 26.0f)
@@ -736,14 +740,19 @@ void draw_widget_scroll(uiWidgetColors *wcol, const rcti *rect, const rcti *slid
  *
  * \param clip_right_if_tight: In case this middle clipping would just remove a few chars, or there
  * are less than 10 characters before the clipping, it rather clips right, which is more readable.
+ *
+ * \param shorten_template_variables: When true, shortens template variable expressions
+ * as needed starting from the left. NOTE: this should only be set to true if the text
+ * field being clipped supports template variables!
  */
 float text_clip_middle_ex(const uiFontStyle *fstyle,
                           char *str,
                           float okwidth,
                           float minwidth,
-                          size_t max_len,
+                          size_t str_maxncpy,
                           char rpart_sep,
-                          bool clip_right_if_tight = true);
+                          bool clip_right_if_tight = true,
+                          bool shorten_template_variables = false);
 
 Vector<StringRef> text_clip_multiline_middle(const uiFontStyle *fstyle,
                                              const char *str,
@@ -869,6 +878,10 @@ bool block_is_empty_ex(const Block *block, bool skip_title);
 bool block_is_empty(const Block *block);
 bool block_can_add_separator(const Block *block);
 /**
+ * Return the first default button (activated by "Return") or null.
+ */
+const Button *block_active_default_button_find(const Block *block);
+/**
  * Return true when the block has a default button.
  * Use this for popups to detect when pressing "Return" will run an action.
  */
@@ -952,10 +965,8 @@ void popup_menu_but_set(PopupMenu *pup, ARegion *butregion, Button *but);
 
 struct Popover;
 
-wmOperatorStatus popover_panel_invoke(bContext *C,
-                                      const char *idname,
-                                      bool keep_open,
-                                      ReportList *reports);
+wmOperatorStatus popover_panel_invoke(
+    bContext *C, const char *idname, bool keep_open, bool use_numselect, ReportList *reports);
 
 /**
  * Only return handler, and set optional title.
@@ -963,7 +974,11 @@ wmOperatorStatus popover_panel_invoke(bContext *C,
  * \param from_active_button: Use the active button for positioning,
  * use when the popover is activated from an operator instead of directly from the button.
  */
-Popover *popover_begin(bContext *C, int ui_menu_width, bool from_active_button) ATTR_NONNULL(1);
+/**
+ * \param use_numselect: Assign accelerator keys to buttons.
+ */
+Popover *popover_begin(bContext *C, int ui_menu_width, bool from_active_button, bool use_numselect)
+    ATTR_NONNULL(1);
 /**
  * Set the whole structure to work.
  */
@@ -996,25 +1011,20 @@ void popup_block_invoke(bContext *C,
                         BlockCreateFunc func,
                         void *arg,
                         FreeArgFunc arg_free,
-                        StructRNA *srna_owner = nullptr,
-                        bool use_menu_scale = true);
+                        StructRNA *srna_owner = nullptr);
 /**
  * \param can_refresh: When true, the popup may be refreshed (updated after creation).
  * \note It can be useful to disable refresh (even though it will work)
  * as this exits text fields which can be disruptive if refresh isn't needed.
  * \param srna_owner: The StructRNA type that owns this popup, this popup should be removed if this
  * type gets unregistered.
- * \param use_menu_scale: Whether the popup is drawn at the touch menu scale, see
- * #ED_ui_menu_scale. True for anything a finger aims at. False for fixed-proportion artwork such
- * as the splash screen, which runs out of screen before it runs out of scale.
  */
 void popup_block_invoke_ex(bContext *C,
                            BlockCreateFunc func,
                            void *arg,
                            FreeArgFunc arg_free,
                            bool can_refresh,
-                           StructRNA *srna_owner = nullptr,
-                           bool use_menu_scale = true);
+                           StructRNA *srna_owner = nullptr);
 void popup_block_ex(bContext *C,
                     BlockCreateFunc func,
                     BlockHandleFunc popup_func,
@@ -1076,6 +1086,17 @@ Block *block_begin(const bContext *C,
                    ARegion *region,
                    std::string name,
                    EmbossType emboss);
+
+/** Execute every block's after layout callback. */
+void block_post_layout_callbacks_exec(const bContext *C, ARegion *region, Block *block);
+
+/**
+ * \param postpone_callbacks: After block layout callbacks are postponed, caller must execute
+ * them with #block_post_layout_callbacks_exec.
+ * This is necessary if a callback requires to access the region bounds but they
+ * might be no known yet. For example: activating a button may scroll the region view so it can get
+ * properly focused, but that requires to build all panels in a region.
+ */
 void block_end_ex(const bContext *C,
                   Main *bmain,
                   wmWindow *window,
@@ -1084,8 +1105,9 @@ void block_end_ex(const bContext *C,
                   Depsgraph *depsgraph,
                   Block *block,
                   const int xy[2] = nullptr,
-                  int r_xy[2] = nullptr);
-void block_end(const bContext *C, Block *block);
+                  int r_xy[2] = nullptr,
+                  bool postpone_callbacks = false);
+void block_end(const bContext *C, Block *block, bool postpone_callbacks = false);
 /**
  * Uses local copy of style, to scale things down, and allow widgets to change stuff.
  */
@@ -1245,11 +1267,6 @@ const ColorManagedDisplay *button_cm_display_get(Button &but);
 void button_placeholder_set(Button *but, StringRef placeholder_text);
 
 /**
- * Unselect any text selection in the button's text field.
- */
-void button_clear_selection(Button *but);
-
-/**
  * Special button case, only draw it when used actively, for outliner etc.
  *
  * Needed for temporarily rename buttons, such as in outliner or file-select,
@@ -1372,6 +1389,21 @@ Button *uiDefButR_prop(Block *block,
                        float min,
                        float max,
                        std::optional<StringRef> tip);
+/**
+ * Height of the text-box with the given state.
+ */
+int textbox_but_height(const TextboxState &state);
+
+/**
+ * Create a multi-line text-box for editing an RNA property.
+ */
+Button *uiDefButTextBoxR(Block *block,
+                         PointerRNA *ptr,
+                         StringRefNull propname,
+                         TextboxState *state,
+                         int x,
+                         int y,
+                         short width);
 Button *uiDefButO(Block *block,
                   ButtonType type,
                   StringRefNull opname,
@@ -1661,7 +1693,7 @@ enum {
   TEMPLATE_ID_FILTER_AVAILABLE = 1,
 };
 
-/***************************** ID Utilities *******************************/
+/* ID utilities. */
 
 int icon_from_id(const ID *id);
 /** See: #BKE_report_type_str */
@@ -1901,16 +1933,6 @@ void button_func_search_set_results_are_suggestions(Button *but, bool value);
  * Height in pixels, it's using hard-coded values still.
  */
 int searchbox_size_y();
-/**
- * The tallest search box that fits in `height_max` and still holds whole rows.
- *
- * Touch: a phone can leave less room than the ten rows a desktop shows -- the on-screen keyboard
- * takes the bottom of the screen, and a window in Android's split screen takes half of what is
- * left. Returns a height that is a whole number of rows so they come out full size rather than
- * ten squeezed ones, and never fewer than two, which is the point below which the list stops
- * being a list.
- */
-int searchbox_size_y_fit(int height_max);
 int searchbox_size_x();
 /**
  * Guess a good width for the search box based on the searchable items.
@@ -2101,10 +2123,22 @@ void button_tooltip_refresh(bContext *C, Button *but);
  */
 void button_tooltip_timer_remove(bContext *C, Button *but);
 
+/**
+ * Attempt to activate an button referencing an RNA property in the \a region.
+ * \param block_name: targets a block in the \a region, if \a block_name is not set it will test
+ * any block in the \a region.
+ * \returns `true` if the button gets activated.
+ */
 bool textbutton_activate_rna(const bContext *C,
                              ARegion *region,
                              const void *rna_poin_data,
                              const char *rna_prop_id);
+bool textbutton_activate_rna(const bContext *C,
+                             ARegion *region,
+                             const void *rna_poin_data,
+                             const char *rna_prop_id,
+                             Block &block);
+
 bool textbutton_activate_but(const bContext *C, Button *actbut);
 
 /**
@@ -2200,6 +2234,8 @@ void panels_end(const bContext *C, ARegion *region, int *r_x, int *r_y);
  */
 void panels_draw(const bContext *C, ARegion *region);
 
+void panels_do_after_block_layout_fns(const bContext *C, ARegion *region);
+
 Panel *panel_find_by_type(ListBaseT<Panel> *lb, const PanelType *pt);
 /**
  * \note \a panel should be return value from #panel_find_by_type and can be NULL.
@@ -2270,6 +2306,8 @@ void panel_category_clear_all(ARegion *region);
 void panel_category_tabs_draw_all(const bContext *C,
                                   ARegion *region,
                                   const char *category_id_active);
+/** Scrolls the region's category bar to show the #category. */
+void panel_category_show_tab(const bContext &C, ARegion *region, StringRef category);
 
 void panel_stop_animation(const bContext *C, Panel *panel);
 
@@ -2523,6 +2561,28 @@ void template_search_preview(Layout *layout,
                              int rows,
                              int cols,
                              std::optional<StringRef> text = std::nullopt);
+
+/**
+ * Create a filepath with filebrowser button, similar to the default layout generated for this type
+ * of string property by `Layout::prop()`, but with more control.
+ *
+ * \param pathselect_op: If not null, the name of the operator to call (instead of the generic
+ * `BUTTONS_OT_file_browse` or `BUTTONS_OT_directory_browse` ones).
+ * \param filter_glob: If not empty, a 'glob filter' string listing all allowed extensions to list
+ * in the filebrowser, separated by semi-columns (e.g. `*.usd;*.usda;*.usdc;*.usdz`). Only used if
+ * the property sub-type is `PROP_FILEPATH`.
+ * \param name: Label text, the property name is used if unset.
+ * \param placeholder: the placeholder text to show in the text widget, when empty.
+ */
+void template_filepath(Layout *layout,
+                       const bContext *C,
+                       PointerRNA *ptr,
+                       const StringRefNull propname,
+                       const char *pathselect_op,
+                       const char *filter_glob,
+                       const std::optional<StringRef> name,
+                       const std::optional<StringRef> placeholder);
+
 /**
  * This is creating/editing RNA-Paths
  *
@@ -2537,6 +2597,8 @@ void template_path_builder(Layout *layout,
                            std::optional<StringRefNull> text);
 void template_modifiers(Layout *layout, bContext *C);
 void template_strip_modifiers(Layout *layout, bContext *C);
+void template_scene_compositor_effects(Layout *layout, bContext *C);
+
 /**
  * Check if the shader effect panels don't match the data and rebuild the panels if so.
  */
@@ -2791,6 +2853,11 @@ void template_tree_interface(Layout *layout, const bContext *C, PointerRNA *ptr)
  * Draw all node buttons and socket default values with the same panel structure used by the node.
  */
 void template_node_inputs(Layout *layout, bContext *C, PointerRNA *ptr);
+
+/**
+ * Draw the node group inputs for a compositor effect strip.
+ */
+void template_compositor_strip_inputs(Layout *layout, bContext *C, PointerRNA *ptr);
 
 void template_collection_importer(Layout *layout, bContext *C);
 void template_collection_exporters(Layout *layout, bContext *C);
@@ -3052,6 +3119,9 @@ ARegion *tooltip_create_from_button_or_extra_icon(bContext *C,
                                                   ButtonExtraOpIcon *extra_icon,
                                                   bool is_quick_tip);
 ARegion *tooltip_create_from_gizmo(bContext *C, wmGizmo *gz);
+ARegion *tooltip_create_from_func(bContext *C,
+                                  FunctionRef<void(TooltipData &data)> create_fn,
+                                  const float init_position[2]);
 
 void tooltip_free(bContext *C, bScreen *screen, ARegion *region);
 
@@ -3162,6 +3232,10 @@ AbstractViewItem *region_views_find_item_at(const ARegion &region, const int xy[
 AbstractViewItem *region_views_find_active_item(const ARegion *region, const AbstractView *view);
 Button *region_views_find_active_item_but(const ARegion *region);
 void region_views_clear_search_highlight(const ARegion *region);
+
+bool region_panels_fits_only_categories(const ARegion *region);
+
+void register_scene_compositor_effects_panel(ARegionType *region_type);
 
 enum class ActivationButtonState : int8_t {
   Highlight,

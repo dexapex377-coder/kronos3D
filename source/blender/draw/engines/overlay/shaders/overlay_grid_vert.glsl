@@ -7,8 +7,8 @@
 VERTEX_SHADER_CREATE_INFO(overlay_grid_next)
 
 #include "draw_view_lib.glsl"
-#include "gpu_shader_math_base_lib.glsl"
-#include "gpu_shader_utildefines_lib.glsl"
+#include "gpu_shader_math_base.bsl.hh"
+#include "gpu_shader_utildefines.bsl.hh"
 #include "overlay_grid_common_lib.glsl"
 
 struct LineData {
@@ -72,12 +72,7 @@ bool is_occluded_by_higher_level(LineData line, uint level)
       /* To determine if a higher up line occludes the current line; we solve the following:
        * given scalars s1, s2 and integer i, is there an integer j : i*s1 = j*s2. The value in
        * `line.P` holds i*s1, so we compute j = i*s1/s2 and verify if it is an integer.  */
-      /* Select components explicitly, see the note on `step_size`. */
-      float line_pos = (line.axis == 0u) ? line.P.y : line.P.x;
-      float4 next_vec = grid_buf.steps[level + 1];
-      float next_step = (line.axis == 0u) ? next_vec.x :
-                                            ((line.axis == 1u) ? next_vec.y : next_vec.z);
-      float j = abs(line_pos) / next_step;
+      float j = abs(line.P[1 - line.axis]) / grid_buf.steps[level + 1][line.axis];
       if (is_equal(floor(j), j, 1e-4f)) {
         return true;
       }
@@ -109,14 +104,11 @@ void main()
   /* Compute per-level size, camera offset for lines. Offset is rounded to the nearest
    * level-dependent line position for grid, while axes simply move with the camera. */
   uint step_axis = flag_test(grid_flag, GRID_SIMA) ? 1u - line.axis : line.axis;
-  /* Select the component explicitly; dynamic component indexing of a vector
-   * miscompiles on some drivers (Adreno), collapsing lines of one axis. */
-  float4 step_vec = grid_buf.steps[level];
-  float step_size = (step_axis == 0u) ? step_vec.x : ((step_axis == 1u) ? step_vec.y : step_vec.z);
+  float step_size = grid_buf.steps[level][step_axis];
 
   float2 step_offs = grid_buf.offset;
   /* TODO(not_mark): remove all this horrible axis-swapping BS in BSL port. */
-  if (flag_test(grid_flag, SHOW_GRID)) {
+  if (flag_test(grid_flag, SHOW_GRID) && !flag_test(grid_flag, GRID_SIMA)) {
     /* Line moves with offset along its axis, but snaps to the rounded offset on the other axis. */
     if (line.axis == 0) {
       step_offs.y = round(grid_buf.offset.y / step_size) * step_size;

@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: 2026 Blender Authors
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# CMake toolchain file wrapper around the Android NDK toolchain to set values
+# such as targetted ABI, minimum SDK version, etc... prior to including it.
+
+# ----------------------------------------------------------------------------
+# Android NDK discovery
+
+# Buildling for Android is only supported on macOS and Linux.
+if(NOT (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"))
+  message(FATAL_ERROR "Building for Android isn't supported on host ${CMAKE_HOST_SYSTEM_NAME}.")
+endif()
+
+# May be set explicitly by setting ANDROID_NDK_ROOT. Otherwise we try to infer the most
+# recent NDK version installed on the host from default paths.
+if(NOT DEFINED ANDROID_NDK_ROOT)
+  if(DEFINED ENV{ANDROID_HOME})
+    # ANDROID_HOME is commonly set to point to the base SDK root, used by Android Studio and others.
+    set(_android_sdk_dir "$ENV{ANDROID_HOME}")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(_android_sdk_dir "$ENV{HOME}/Library/Android/sdk")
+  else()
+    set(_android_sdk_dir "$ENV{HOME}/Android/Sdk")
+  endif()
+
+  file(GLOB _ndk_dirs "${_android_sdk_dir}/ndk/*")
+  list(SORT _ndk_dirs COMPARE NATURAL)
+  list(POP_BACK _ndk_dirs ANDROID_NDK_ROOT)
+
+  if(NOT EXISTS ${ANDROID_NDK_ROOT})
+    message(FATAL_ERROR
+      "Failed to infer Android NDK root location, tried: ${_android_sdk_dir}/ndk/*. "
+      "Ensure you have one installed, or manually set ANDROID_NDK_ROOT to its location. "
+      "To obtain the Android NDK, Android Studio or the Android sdkmanager may be used."
+    )
+  endif()
+
+  unset(_android_sdk_dir)
+  unset(_ndk_dirs)
+endif()
+
+set(NDK_TOOLCHAIN_FILE "${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake")
+
+if(NOT EXISTS ${NDK_TOOLCHAIN_FILE})
+  message(FATAL_ERROR
+    "Could not find Android NDK toolchain file at ${NDK_TOOLCHAIN_FILE}."
+  )
+else()
+  message(STATUS "Using Android NDK: ${ANDROID_NDK_ROOT}")
+endif()
+
+# ----------------------------------------------------------------------------
+# Android ABI
+
+# arm64-v8a the only ABI we directly support (64-bit ARM CPUs).
+
+set(ANDROID_ABI arm64-v8a)
+
+# ----------------------------------------------------------------------------
+# Android platform / minimum SDK version.
+
+# Set to API level 29, minimum set to Android 10. See https://apilevels.com.
+
+# - Used to be 23 (min Android 6.0), bumped to 28 to support C11 aligned_alloc required by OpenJPH.
+#   It might be possible to lower it back down by patching OpenJPH.
+# - Used to be 28 (min Android 9.0), bumped to 29 to support timespec_get for BLI's uuid.cc.
+#   It should be possible to lower it back down by adding an ifdef switch in uuid.cc
+
+set(ANDROID_PLATFORM android-29)
+
+# ----------------------------------------------------------------------------
+# Android STL type (static/shared)
+
+# Using the shared due to the use of multiple shared libraries.
+# See: https://developer.android.com/ndk/guides/cpp-support#shared_runtimes
+
+set(ANDROID_STL c++_shared)
+
+# ----------------------------------------------------------------------------
+# Use Legacy Android NDK CMake toolchain file
+
+# Despite its name, the legacy Android toolchain is the main supported NDK CMake toolchain,
+# with the "new" toolchain file including behavior regressions.
+# See: https://developer.android.com/ndk/guides/cmake#the_new_toolchain_file
+
+set(ANDROID_USE_LEGACY_TOOLCHAIN ON)
+
+# ----------------------------------------------------------------------------
+# Android feature set (-DBLENDER_ANDROID_CONFIG=lite|full, or env, default full).
+
+# Mirrors build_files/cmake/platform/platform_android.cmake upstream: the same
+# feature file must drive both the target build and the host codegen-tools
+# build, otherwise generated RNA/DNA encodes a feature set that mismatches the
+# compiled target (missing getters, or silent corruption in release builds).
+if(NOT DEFINED BLENDER_ANDROID_CONFIG)
+  if(DEFINED ENV{BLENDER_ANDROID_CONFIG})
+    set(BLENDER_ANDROID_CONFIG $ENV{BLENDER_ANDROID_CONFIG})
+  else()
+    set(BLENDER_ANDROID_CONFIG full)
+  endif()
+endif()
+message(STATUS "Android config: ${BLENDER_ANDROID_CONFIG}")
+get_filename_component(_blender_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+include(${_blender_root}/build_files/android/android_features_${BLENDER_ANDROID_CONFIG}.cmake)
+unset(_blender_root)
+
+# ----------------------------------------------------------------------------
+# Main Android NDK toolchain file include
+
+include(${NDK_TOOLCHAIN_FILE})

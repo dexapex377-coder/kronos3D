@@ -2,10 +2,15 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/** \file
+ * \ingroup geo
+ */
+
 #include "BLI_color.hh"
 #include "BLI_math_base.hh"
 #include "BLI_math_rotation.hh"
 #include "BLI_string_utils.hh"
+#include "BLI_vector_set.hh"
 
 #include "BKE_attribute_math.hh"
 #include "BKE_volume.hh"
@@ -345,7 +350,7 @@ namespace kernel_functions {
  * This is equivalent to the offset applied to sampling positions,
  * see geometry::grid_sampling::sample_tree.
  */
-inline int kernel_size(const KernelType kernel_type)
+inline int kernel_range(const KernelType kernel_type)
 {
   using namespace geometry::grid_sampling;
 
@@ -437,7 +442,7 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
   static const int32_t DIM = TreeType::LeafNodeType::DIM;
 
   KernelType kernel_type_;
-  int kernel_size_;
+  int kernel_range_;
 
   /* Point attribute name for input values. */
   StringRef value_attribute_;
@@ -453,7 +458,7 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
       : TransformTransfer(source.transform(), dest.transform()),
         openvdb::points::VolumeTransfer<TreeType>(dest.tree()),
         kernel_type_(kernel_type),
-        kernel_size_(kernel_functions::kernel_size(kernel_type)),
+        kernel_range_(kernel_functions::kernel_range(kernel_type)),
         value_attribute_(value_attribute)
   {
   }
@@ -462,7 +467,7 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
       : TransformTransfer(other),
         openvdb::points::VolumeTransfer<TreeType>(other),
         kernel_type_(other.kernel_type_),
-        kernel_size_(other.kernel_size_),
+        kernel_range_(other.kernel_range_),
         value_attribute_(other.value_attribute_)
   {
   }
@@ -475,7 +480,7 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
   /* Search range for point voxels around the target voxel. */
   openvdb::Int32 range(const openvdb::Coord & /*leaf_origin*/, size_t /*leaf_idx*/) const
   {
-    return (kernel_size_ + 1) >> 1;
+    return kernel_range_;
   }
 
   AttributeType get_value(const openvdb::Index point_index)
@@ -498,9 +503,9 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
    * For each point, compute its relative index space position in the destination tree and
    * sum a function of per-point values.
    *
-   * \param ijk Point voxel coordinate.
-   * \param point_index_range Range of points inside the point voxel bounds.
-   * \param target_bounds Coordinate region of the destination tree to add into.
+   * \param ijk: Point voxel coordinate.
+   * \param point_index_range: Range of points inside the point voxel bounds.
+   * \param target_bounds: Coordinate region of the destination tree to add into.
    */
   template<typename ValueFn>
   void add_points_to_voxels(const openvdb::Coord &ijk,
@@ -508,8 +513,8 @@ struct KernelTransferBase : public openvdb::points::TransformTransfer,
                             const openvdb::CoordBBox &target_bounds,
                             ValueFn value_fn)
   {
-    const int max_offset = ((kernel_size_ + 1) >> 1);
-    openvdb::CoordBBox intersect_box(ijk.offsetBy(-max_offset + 1), ijk.offsetBy(max_offset));
+    /* Left side includes the target voxel index, subtract 1. */
+    openvdb::CoordBBox intersect_box(ijk.offsetBy(-kernel_range_), ijk.offsetBy(kernel_range_));
     intersect_box.intersect(target_bounds);
     if (intersect_box.empty()) {
       return;
@@ -607,7 +612,7 @@ static typename GridType::Ptr prepare_destination_grid(
     SCOPED_TIMER("      dilateActiveValues");
 #  endif
     /* Dilate to ensure all voxels within range of a particle are active. */
-    const int max_offset = (kernel_functions::kernel_size(kernel_type) + 1) >> 1;
+    const int max_offset = kernel_functions::kernel_range(kernel_type);
     openvdb::tools::dilateActiveValues(dst_grid->tree(),
                                        max_offset,
                                        openvdb::tools::NN_FACE_EDGE_VERTEX,

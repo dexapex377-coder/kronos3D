@@ -49,8 +49,10 @@ struct GPUPass {
 
   uint64_t compilation_timestamp = 0;
 
-  /** Hint that an optimized variant of this pass should be created.
-   *  Based on a complexity heuristic from pass code generation. */
+  /**
+   * Hint that an optimized variant of this pass should be created.
+   * Based on a complexity heuristic from pass code generation.
+   */
   bool should_optimize = false;
   bool is_optimization_pass = false;
 
@@ -368,7 +370,7 @@ GPUPass *GPU_generate_pass(GPUMaterial *material,
 
   GPUCodegen codegen(material, graph, debug_name);
   codegen.generate_graphs();
-  codegen.generate_cryptomatte();
+  codegen.generate_material_props();
 
   GPUPass *pass = nullptr;
 

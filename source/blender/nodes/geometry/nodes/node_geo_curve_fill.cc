@@ -103,7 +103,7 @@ static meshintersect::CDT_result<double> do_cdt(const bke::CurvesGeometry &curve
   input.vert = positions_2d;
   input.face_offsets = points_by_curve;
   input.face_vert_indices = face_vert_indices;
-  input.need_ids = false;
+  input.needed_ids = CDT_NO_ORIG_IDS;
   return delaunay_2d_calc(input, output_type);
 }
 
@@ -138,7 +138,7 @@ static meshintersect::CDT_result<double> do_cdt_with_mask(const bke::CurvesGeome
   input.vert = positions_2d;
   input.face_offsets = points_by_curve_masked;
   input.face_vert_indices = face_vert_indices;
-  input.need_ids = false;
+  input.needed_ids = CDT_NO_ORIG_IDS;
 
   return delaunay_2d_calc(input, output_type);
 }
@@ -158,10 +158,8 @@ static Array<meshintersect::CDT_result<double>> do_group_aware_cdt(
     return {do_cdt(curves, output_type)};
   }
 
-  VectorSet<int> group_indexing;
   IndexMaskMemory mask_memory;
-  const Vector<IndexMask> group_masks = IndexMask::from_group_ids(
-      curve_group_ids, mask_memory, group_indexing);
+  const Vector<IndexMask> group_masks = IndexMask::from_group_ids(curve_group_ids, mask_memory);
   const int groups_num = group_masks.size();
 
   Array<meshintersect::CDT_result<double>> cdt_results(groups_num);

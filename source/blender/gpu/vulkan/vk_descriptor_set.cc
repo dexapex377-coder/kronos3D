@@ -9,7 +9,6 @@
 #include "vk_descriptor_set.hh"
 #include "vk_buffer.hh"
 #include "vk_index_buffer.hh"
-#include "vk_pipeline_diag.hh"
 #include "vk_ray_tracing.hh"
 #include "vk_shader.hh"
 #include "vk_shader_interface.hh"
@@ -23,12 +22,6 @@
 namespace blender::gpu {
 
 static CLG_LogRef LOG = {"gpu.vulkan"};
-
-/* Sampling with linear filtering is only valid when the format supports it. */
-static bool needs_nearest_filter(const VKDevice &device, const VKTexture &texture)
-{
-  return !device.format_supports_linear_filter(to_vk_format(texture.device_format_get()));
-}
 
 void VKDescriptorSetTracker::update_descriptor_set(VKContext &context,
                                                    render_graph::VKResourceAccessInfo &access_info,
@@ -338,12 +331,14 @@ void VKDescriptorSetUpdator::bind_image_resource(const VKStateManager &state_man
                                                  const VKResourceBinding &resource_binding)
 {
   VKTexture &texture = *state_manager.images_.get(resource_binding.binding);
-  bind_image(
-      VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-      VK_NULL_HANDLE,
-      texture.image_view_get(resource_binding.arrayed, VKImageViewFlags::NO_SWIZZLING).vk_handle(),
-      VK_IMAGE_LAYOUT_GENERAL,
-      resource_binding.location);
+  const VKImageView &view = texture.image_view_get(resource_binding.arrayed,
+                                                   VKImageViewFlags::NO_SWIZZLING |
+                                                       VKImageViewFlags::FOR_STORAGE_IMAGE);
+  bind_image(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+             VK_NULL_HANDLE,
+             view.vk_handle(),
+             VK_IMAGE_LAYOUT_GENERAL,
+             resource_binding.location);
 }
 
 void VKDescriptorSetUpdator::bind_texture_resource(const VKDevice &device,
@@ -372,8 +367,7 @@ void VKDescriptorSetUpdator::bind_texture_resource(const VKDevice &device,
         bind_texel_buffer(vertex_buffer, resource_binding.location);
       }
       else {
-        const VKSampler &sampler = device.samplers().get(elem.sampler,
-                                                         needs_nearest_filter(device, *texture));
+        const VKSampler &sampler = device.samplers().get(elem.sampler);
         bind_image(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                    sampler.vk_handle(),
                    texture->image_view_get(resource_binding.arrayed, VKImageViewFlags::DEFAULT)
@@ -417,8 +411,7 @@ void VKDescriptorSetUpdator::bind_input_attachment_resource(
     VKTexture *texture = static_cast<VKTexture *>(elem.resource);
     BLI_assert(texture);
     BLI_assert(elem.resource_type == BindSpaceTextures::Type::Texture);
-    const VKSampler &sampler = device.samplers().get(elem.sampler,
-                                                     needs_nearest_filter(device, *texture));
+    const VKSampler &sampler = device.samplers().get(elem.sampler);
     bind_image(
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         sampler.vk_handle(),
@@ -571,16 +564,6 @@ void VKDescriptorSetPoolUpdator::allocate_new_descriptor_set(
 {
   /* Use descriptor pools/sets. */
   vk_descriptor_set = context.descriptor_pools_get().allocate(vk_descriptor_set_layout);
-  if (vk_descriptor_set == VK_NULL_HANDLE) {
-    /* Log before the (release-NDEBUG no-op) assert; this is the moment a failed allocate leaves
-     * a NULL descriptor set recorded inside the render graph, which the MTK driver later
-     * null-derefs while building command groups. The shader/pass name is the only breadcrumb
-     * we have at this point for what was being built. */
-    vk_pipeline_diag_logf(
-        "DESCSET allocate returned VK_NULL_HANDLE | shader=%s | layout=0x%zX",
-        shader.name_get().c_str(),
-        size_t(vk_descriptor_set_layout));
-  }
   BLI_assert(vk_descriptor_set != VK_NULL_HANDLE);
   debug::object_label(vk_descriptor_set, shader.name_get());
   r_pipeline_data.vk_descriptor_set = vk_descriptor_set;
@@ -662,7 +645,7 @@ void VKDescriptorSetPoolUpdator::bind_acceleration_structure(
                                     nullptr,
                                     nullptr,
                                     nullptr});
-  vk_write_descrtiptor_sets_acceleration_structures_.append(
+  vk_write_descriptor_sets_acceleration_structures_.append(
       {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, nullptr, 1, nullptr});
   vk_acceleration_structures_.append(vk_acceleration_structure);
 }
@@ -671,22 +654,6 @@ void VKDescriptorSetPoolUpdator::upload_descriptor_sets()
 {
   if (vk_write_descriptor_sets_.is_empty()) {
     return;
-  }
-
-  /* The MTK driver faulted (null-deref @0x38) inside upload_descriptor_sets after a pool reset
-   * left a cached descriptor set dangling. With the pool-discard invalidation in place this should
-   * never be null, but refuse to hand a null set to the driver (a crash) if it ever slips through. */
-  if (vk_descriptor_set == VK_NULL_HANDLE) {
-    vk_pipeline_diag_logf("DESCSET upload skipped: cached set is VK_NULL_HANDLE (pending writes %zu)",
-                          vk_write_descriptor_sets_.size());
-    invalidate();
-    return;
-  }
-  static int upload_counter = 0;
-  if ((upload_counter++ % 600) == 0) {
-    vk_pipeline_diag_logf("DESCSET upload set=0x%zX writes=%zu (rate-limited)",
-                          (size_t)vk_descriptor_set,
-                          vk_write_descriptor_sets_.size());
   }
 
   /* Finalize pointers that could have changed due to reallocations. */
@@ -712,10 +679,10 @@ void VKDescriptorSetPoolUpdator::upload_descriptor_sets()
         break;
 
       case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
-        vk_write_descrtiptor_sets_acceleration_structures_[acceleration_structure_index]
+        vk_write_descriptor_sets_acceleration_structures_[acceleration_structure_index]
             .pAccelerationStructures = &vk_acceleration_structures_[acceleration_structure_index];
         vk_write_descriptor_set.pNext =
-            &vk_write_descrtiptor_sets_acceleration_structures_[acceleration_structure_index++];
+            &vk_write_descriptor_sets_acceleration_structures_[acceleration_structure_index++];
         break;
 
       default:
@@ -783,7 +750,7 @@ void VKDescriptorSetPoolUpdator::upload_descriptor_sets()
   vk_descriptor_buffer_infos_.clear();
   vk_buffer_views_.clear();
   vk_acceleration_structures_.clear();
-  vk_write_descrtiptor_sets_acceleration_structures_.clear();
+  vk_write_descriptor_sets_acceleration_structures_.clear();
   vk_write_descriptor_sets_.clear();
 }
 

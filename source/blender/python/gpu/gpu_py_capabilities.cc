@@ -419,42 +419,7 @@ static PyObject *pygpu_ray_query_support_get(PyObject * /*self*/)
 #  endif
 #endif
 
-PyDoc_STRVAR(
-    /* Wrap. */
-    pygpu_memory_statistics_get_doc,
-    ".. function:: memory_statistics_get()\n"
-    "\n"
-    "   Touch: get the graphics memory available to this process, and how much of it is in use.\n"
-    "\n"
-    "   Both figures are in kilobytes. Returns None where the backend cannot report them.\n"
-    "\n"
-    "   This is the same pair the status bar shows, so anything else that reports graphics\n"
-    "   memory agrees with it by construction rather than by being kept in step by hand.\n"
-    "\n"
-    "   :return: (total, in use), in kilobytes, or None.\n"
-    "   :rtype: tuple[int, int] | None\n");
-static PyObject *pygpu_memory_statistics_get(PyObject * /*self*/)
-{
-  BPYGPU_IS_INIT_OR_ERROR_OBJ;
-
-  if (!GPU_mem_stats_supported()) {
-    Py_RETURN_NONE;
-  }
-
-  int total_mem_kb = 0, free_mem_kb = 0;
-  GPU_mem_stats_get(&total_mem_kb, &free_mem_kb);
-  if (total_mem_kb <= 0) {
-    Py_RETURN_NONE;
-  }
-
-  return Py_BuildValue("(ii)", total_mem_kb, total_mem_kb - free_mem_kb);
-}
-
 static PyMethodDef pygpu_capabilities__tp_methods[] = {
-    {"memory_statistics_get",
-     reinterpret_cast<PyCFunction>(pygpu_memory_statistics_get),
-     METH_NOARGS,
-     pygpu_memory_statistics_get_doc},
     {"max_texture_size_get",
      reinterpret_cast<PyCFunction>(pygpu_max_texture_size_get),
      METH_NOARGS,

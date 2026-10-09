@@ -18,7 +18,7 @@ VKSampler::~VKSampler()
   free();
 }
 
-void VKSampler::create(const GPUSamplerState &sampler_state, bool no_linear_filter)
+void VKSampler::create(const GPUSamplerState &sampler_state)
 {
   BLI_assert(sampler_state.type != GPU_SAMPLER_STATE_TYPE_INTERNAL);
   BLI_assert(vk_sampler_ == VK_NULL_HANDLE);
@@ -70,15 +70,6 @@ void VKSampler::create(const GPUSamplerState &sampler_state, bool no_linear_filt
       sampler_info.compareEnable = VK_TRUE;
       sampler_info.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     }
-  }
-
-  if (no_linear_filter) {
-    /* Keep the LOD range so mips stay accessible, only the interpolation is dropped. */
-    sampler_info.magFilter = VK_FILTER_NEAREST;
-    sampler_info.minFilter = VK_FILTER_NEAREST;
-    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    sampler_info.anisotropyEnable = VK_FALSE;
-    sampler_info.maxAnisotropy = 1.0f;
   }
 
   device.functions.vkCreateSampler(device.vk_handle(), &sampler_info, nullptr, &vk_sampler_);

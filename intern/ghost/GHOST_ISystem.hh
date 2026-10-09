@@ -293,13 +293,6 @@ class GHOST_ISystem {
   virtual void setAutoFocus(const bool auto_focus) = 0;
 
   /**
-   * Show/hide an on-screen keyboard, for platforms without a physical one.
-   * Default implementations are no-ops; only touch backends act on these.
-   */
-  virtual GHOST_TSuccess popupOnScreenKeyboard(GHOST_IWindow *window) = 0;
-  virtual GHOST_TSuccess hideOnScreenKeyboard(GHOST_IWindow *window) = 0;
-
-  /**
    * Get the Window under the cursor. Although coordinates of the mouse are supplied, platform-
    * specific implementations are free to ignore these and query the mouse location themselves, due
    * to them possibly being incorrect under certain conditions, for example when using multiple

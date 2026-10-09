@@ -75,23 +75,8 @@ enum class AreaDockTarget {
 
 /**
  * Expanded interaction influence of area borders.
- *
- * Touch: half again as wide on Android. This is the reach of the border itself -- how far from it
- * a press still counts as grabbing it -- and measured on the device it comes to about 13 pixels,
- * against a fingertip some 8 mm across. Moving an editor border is a deliberate act on a phone and
- * the only thing at that spot, so a little more room costs almost nothing, while a miss costs the
- * gesture entirely.
- *
- * Half again, not double, because the cost is real: content within this distance of a border
- * cannot be tapped, since the press is taken as an edge grab instead. Unlike
- * ED_screen_edge_snap_for_touch(), this reach is shared with the stylus and the mouse -- which on
- * a phone is what is wanted, since a stylus misses a 13 pixel target too.
  */
-#ifdef __ANDROID__
-#  define BORDERPADDING ((U.border_width * UI_SCALE_FAC + 3.0f * UI_SCALE_FAC) * 1.5f)
-#else
-#  define BORDERPADDING (U.border_width * UI_SCALE_FAC + 3.0f * UI_SCALE_FAC)
-#endif
+#define BORDERPADDING (U.border_width * UI_SCALE_FAC + 3.0f * UI_SCALE_FAC)
 
 /**
  * Number of pixels of the area border corner radius.

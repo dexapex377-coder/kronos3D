@@ -14,14 +14,7 @@
 #define HAVE_DLFCN_H
 
 /* Define to 1 if you have the <execinfo.h> header file. */
-/* Android is __linux__ and so lands in this file, but Bionic ships the header
- * while only declaring backtrace() from API 33. Defining this picks
- * stacktrace_generic-inl.h in utilities.h, which then fails to compile against
- * a lower minimum API. glog uses stack traces only to decorate fatal log
- * messages, so it does without rather than costing the port two API levels. */
-#ifndef __ANDROID__
-#  define HAVE_EXECINFO_H
-#endif
+#define HAVE_EXECINFO_H
 
 /* Define if you have the `fcntl' function */
 #define HAVE_FCNTL

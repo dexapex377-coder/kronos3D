@@ -32,6 +32,7 @@
 #include "DNA_space_types.h"
 #include "DNA_vfont_types.h"
 
+#include "IMB_colormanagement.hh"
 #include "IMB_imbuf_types.hh"
 
 #include "PRF_profile.hh"
@@ -77,9 +78,11 @@ struct SeqFontMap {
 };
 
 static SeqFontMap g_font_map;
+static int g_fallback_font_id = -1;
 
 void fontmap_clear()
 {
+  std::lock_guard lock(g_font_map.mutex);
   for (const auto &item : g_font_map.path_to_file_font_id.items()) {
     BLF_unload_id(item.value);
   }
@@ -88,6 +91,11 @@ void fontmap_clear()
     BLF_unload_id(item.value);
   }
   g_font_map.name_to_mem_font_id.clear();
+
+  if (g_fallback_font_id >= 0) {
+    BLF_unload_id(g_fallback_font_id);
+    g_fallback_font_id = -1;
+  }
 }
 
 static int strip_load_font_file(const std::string &path)
@@ -800,7 +808,7 @@ static int text_effect_line_size_get(const RenderData *context, const TextVars &
 
 int text_effect_font_get(TextVars &text)
 {
-  int font = blf_mono_font_render;
+  int font = -1;
   /* In case font got unloaded behind our backs: mark it as needing a load. */
   if (text.text_blf_id >= 0 && !BLF_is_loaded_id(text.text_blf_id)) {
     text.text_blf_id = STRIP_FONT_NOT_LOADED;
@@ -813,6 +821,18 @@ int text_effect_font_get(TextVars &text)
 
   if (text.text_blf_id >= 0) {
     font = text.text_blf_id;
+  }
+
+  if (font < 0) {
+    /* Try to fallback to the default Blender monospaced font. */
+    std::lock_guard lock(g_font_map.mutex);
+    if (g_fallback_font_id >= 0 && !BLF_is_loaded_id(g_fallback_font_id)) {
+      g_fallback_font_id = -1;
+    }
+    if (g_fallback_font_id < 0) {
+      g_fallback_font_id = BLF_load_mono_default(true);
+    }
+    font = g_fallback_font_id;
   }
   return font;
 }
@@ -1072,6 +1092,19 @@ void text_effect_update_runtime(const RenderData *context, TextVars &text, const
   calc_boundbox(&text, &runtime, image_size);
 }
 
+void text_effect_adjust_relative(TextVars &text, const int2 old_size, const int2 new_size)
+{
+  /* Word wrap is relative to image width. Adjust to avoid text reflow at the new size. */
+  text.wrap_width *= float(old_size.x) / float(new_size.x);
+
+  /* Location is relative to image size. Shift so it sits at the origin, filling the new size. */
+  std::scoped_lock runtime_lock(text_runtime_mutex_get());
+  text_effect_update_runtime(nullptr, text, new_size);
+  BLF_disable(text.runtime->font, BLF_BOLD | BLF_ITALIC);
+  text.loc[0] -= float(text.runtime->text_boundbox.xmin) / new_size.x;
+  text.loc[1] -= float(text.runtime->text_boundbox.ymin) / new_size.y;
+}
+
 static SeqResult do_text_effect(const RenderData *context,
                                 SeqRenderState * /*state*/,
                                 Strip *strip,
@@ -1084,11 +1117,14 @@ static SeqResult do_text_effect(const RenderData *context,
   /* NOTE: text rasterization only fills in part of output image,
    * need to clear it. */
   SeqResult out = prepare_effect_imbufs(context, {}, {}, false);
+  /* Text colors are stored as sRGB in DNA, so image buffer is as well. */
+  IMB_colormanagement_assign_byte_colorspace(out.image,
+                                             IMB_colormanagement_srgb_colorspace_name_get());
   TextVars *data = static_cast<TextVars *>(strip->effectdata);
 
   /* Guard against parallel accesses to the fonts map. */
-  std::lock_guard font_map_lock(g_font_map.mutex);
   std::lock_guard text_runtime_lock(text_runtime_mutex);
+  std::lock_guard font_map_lock(g_font_map.mutex);
 
   text_effect_update_runtime(context, *data, {out.image->x, out.image->y});
   const int font = data->runtime->font;

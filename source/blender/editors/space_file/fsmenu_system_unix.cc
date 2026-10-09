@@ -147,52 +147,6 @@ static void fsmenu_xdg_insert_entry(GHash *xdg_map,
 
 /** \} */
 
-#ifdef __ANDROID__
-/**
- * Android has no XDG directories, and `$HOME` points at a private path the user
- * never sees. Bookmark the shared storage folders instead, and skip the mount
- * table, which only lists the app sandbox mounts of every installed package.
- */
-void fsmenu_read_system(FSMenu *fsmenu, int read_bookmarks)
-{
-  if (!read_bookmarks) {
-    return;
-  }
-
-  const char *storage = getenv("EXTERNAL_STORAGE");
-  if (storage == nullptr || !BLI_is_dir(storage)) {
-    storage = "/storage/emulated/0";
-  }
-  if (!BLI_is_dir(storage)) {
-    return;
-  }
-
-  fsmenu_insert_entry(
-      fsmenu, FS_CATEGORY_SYSTEM_BOOKMARKS, storage, N_("Internal Storage"), ICON_HOME, FS_INSERT_LAST);
-
-  const struct {
-    const char *dir;
-    const char *name;
-    BIFIconID icon;
-  } items[] = {
-      {"Download", N_("Downloads"), ICON_IMPORT},
-      {"Documents", N_("Documents"), ICON_DOCUMENTS},
-      {"Pictures", N_("Pictures"), ICON_FILE_IMAGE},
-      {"Movies", N_("Videos"), ICON_FILE_MOVIE},
-      {"Music", N_("Music"), ICON_FILE_SOUND},
-  };
-
-  for (int i = 0; i < ARRAY_SIZE(items); i++) {
-    char path[FILE_MAXDIR];
-    BLI_path_join(path, sizeof(path), storage, items[i].dir);
-    if (BLI_is_dir(path)) {
-      fsmenu_insert_entry(
-          fsmenu, FS_CATEGORY_SYSTEM_BOOKMARKS, path, items[i].name, items[i].icon, FS_INSERT_LAST);
-    }
-  }
-}
-#else
-
 void fsmenu_read_system(FSMenu *fsmenu, int read_bookmarks)
 {
   const char *home = BLI_dir_home();
@@ -321,7 +275,5 @@ void fsmenu_read_system(FSMenu *fsmenu, int read_bookmarks)
     }
   }
 }
-
-#endif /* !__ANDROID__ */
 
 }  // namespace blender

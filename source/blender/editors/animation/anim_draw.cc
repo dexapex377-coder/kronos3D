@@ -31,6 +31,7 @@
 #include "BKE_global.hh"
 #include "BKE_mask.hh"
 #include "BKE_nla.hh"
+#include "BKE_scene_context.hh"
 
 #include "ED_anim_api.hh"
 #include "ED_keyframes_edit.hh"
@@ -644,15 +645,20 @@ float ANIM_unit_mapping_get_factor(Scene *scene, ID *id, FCurve *fcu, short flag
   /* TODO: change the pointer parameters to references, as this function should not be called
    * without an animated ID or a scene (to get the preferred units). */
 
-  if (!id || !fcu || !fcu->rna_path || !scene) {
+  if (!id || !fcu || !scene) {
     /* Not enough information to do the remapping, so just show the data as-is. */
+    return 1.0f;
+  }
+
+  const ParsedRNAPathRef rna_path = fcu->rna_path_parsed();
+  if (rna_path.is_empty()) {
     return 1.0f;
   }
 
   PointerRNA ptr;
   PropertyRNA *prop;
   PointerRNA id_ptr = RNA_id_pointer_create(id);
-  if (!RNA_path_resolve_property(&id_ptr, fcu->rna_path, &ptr, &prop)) {
+  if (!RNA_path_resolve_property(&id_ptr, rna_path, &ptr, &prop)) {
     /* Without resolving the property, its type & subtype are unknown; remapping is impossible. */
     return 1.0f;
   }
@@ -777,8 +783,7 @@ static bool find_prev_next_keyframes(bContext *C, int *r_nextfra, int *r_prevfra
 
 void ANIM_center_frame(bContext *C, int smooth_viewtx)
 {
-  const bool is_sequencer = CTX_wm_space_seq(C) != nullptr;
-  Scene *scene = is_sequencer ? CTX_data_sequencer_scene(C) : CTX_data_scene(C);
+  Scene *scene = bke::scene_or_sequencer_scene_from_context(*C);
   if (!scene) {
     return;
   }

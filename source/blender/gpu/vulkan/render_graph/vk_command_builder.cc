@@ -9,7 +9,6 @@
 #include "vk_command_builder.hh"
 #include "BLI_index_range.hh"
 #include "vk_backend.hh"
-#include "vk_pipeline_diag.hh"
 #include "vk_render_graph.hh"
 #include "vk_to_string.hh"
 
@@ -23,10 +22,10 @@ static VkImageLayout to_default_image_layout(VkImageAspectFlags aspect, bool use
     if (aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
       return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
-    return vk_image_layout_supported(VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
   }
   if (aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
-    return vk_image_layout_supported(VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
+    return VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
   }
   return use_local_read ? VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR :
                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -121,12 +120,25 @@ void VKCommandBuilder::groups_extract_barriers(VKRenderGraph &render_graph,
 #endif
         barrier_list_.append(barrier);
       }
+
+      /* Reset the tracked layout of aliased images to undefined once their memory can be reused.
+       */
+      if (node.type == VKNodeType::SYNCHRONIZATION &&
+          node.synchronization.reset_layout_to_undefined)
+      {
+        for (const VKRenderGraphImage &link : render_graph.linked_images(node_handle)) {
+          VKResourceStateTracker::Resource &resource = render_graph.resources_.get_image_resource(
+              link.resource.handle);
+          resource.barrier_state.image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        }
+      }
+
       /* Check for additional barriers when resuming rendering.
        *
        * Between suspending rendering and resuming the state/layout of resources can change and
        * require additional barriers.
        */
-      if (node.type == VKNodeType::BEGIN_RENDERING) {
+      else if (node.type == VKNodeType::BEGIN_RENDERING) {
         /* Begin rendering scope. */
         BLI_assert(!rendering_active);
         rendering_scope = node_handle;
@@ -394,25 +406,11 @@ void VKCommandBuilder::groups_build_commands(VKRenderGraph &render_graph,
     }
 
     /* Record group node commands. */
-    static int rg_node_counter = 0;
     for (NodeHandle node_handle : group_node_handles) {
       VKRenderGraphNode &node = render_graph.nodes_[node_handle];
 
       if (G.debug & G_DEBUG_GPU) {
         activate_debug_group(render_graph, command_buffer, debug_groups, node_handle);
-      }
-
-      /* Rate-limited rendering-graph telemetry: log which node types run and the debug group
-       * (EEVEE pass) they belong to. This is what answers "which EEVEE pass was submitting when
-       * the frame went black / the device crashed". */
-      if ((rg_node_counter++ % 64) == 0) {
-        std::string debug_group = render_graph.full_debug_group(node_handle);
-        std::stringstream node_type;
-        node_type << node.type;
-        vk_pipeline_diag_logf("RG-NODE #%d | type=%s | group='%s'",
-                              rg_node_counter,
-                              node_type.str().c_str(),
-                              debug_group.empty() ? "-" : debug_group.c_str());
       }
 
       if (node.type == VKNodeType::BEGIN_RENDERING) {
@@ -461,12 +459,7 @@ void VKCommandBuilder::groups_build_commands(VKRenderGraph &render_graph,
       /* Suspend rendering as the next node group will contain data transfer/dispatch commands.
        */
       rendering_active = false;
-      if (command_buffer.use_render_pass_fallback) {
-        command_buffer.end_render_pass();
-      }
-      else {
-        command_buffer.end_rendering();
-      }
+      command_buffer.end_rendering();
     }
 
     /* Record group post barriers. */

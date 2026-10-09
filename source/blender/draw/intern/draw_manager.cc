@@ -20,6 +20,7 @@
 #include "GPU_shader.hh"
 #include "GPU_texture.hh"
 
+#include "draw_common.hh"
 #include "draw_context_private.hh"
 #include "draw_debug.hh"
 #include "draw_defines.hh"
@@ -164,63 +165,6 @@ void Manager::end_sync()
 
   sync_layer_attributes();
 
-#ifdef __ANDROID__
-  /* The Adreno 750 driver used by the Galaxy S24 Ultra rejects the
-   * `draw_resource_finalize` compute pipeline with VK_ERROR_UNKNOWN. This work is small and was
-   * historically done on the CPU, so keep the exact same data transformation here and upload the
-   * finalized buffers below. Other compute pipelines remain available to the viewport. */
-  for (const uint resource_id : IndexRange(resource_len_)) {
-    const float4x4 &model_mat = matrix_buf.current().data()[resource_id].model;
-    ObjectInfos &infos = infos_buf.current().data()[resource_id];
-    ObjectBounds &bounds = bounds_buf.current().data()[resource_id];
-
-    if (drw_bounds_corners_are_valid(bounds)) {
-      float3 p0 = bounds.bounding_corners[0].xyz();
-      float3 p01 = bounds.bounding_corners[1].xyz() - p0;
-      float3 p02 = bounds.bounding_corners[2].xyz() - p0;
-      float3 p03 = bounds.bounding_corners[3].xyz() - p0;
-      p01.x = std::max(p01.x, 1e-4f);
-      p02.y = std::max(p02.y, 1e-4f);
-      p03.z = std::max(p03.z, 1e-4f);
-      const float3 diagonal = p01 + p02 + p03;
-      const float3 center = p0 + diagonal * 0.5f;
-      const float min_axis = math::reduce_min(math::abs(diagonal));
-      bounds.bounding_sphere = float4(math::transform_point(model_mat, center),
-                                      math::length(math::transform_direction(model_mat, diagonal)) *
-                                          0.5f);
-      bounds.bounding_corners[0] = float4(math::transform_point(model_mat, p0),
-                                          bounds.bounding_corners[0].w);
-      bounds.bounding_corners[1] = float4(math::transform_direction(model_mat, p01),
-                                          bounds.bounding_corners[1].w);
-      bounds.bounding_corners[2] = float4(math::transform_direction(model_mat, p02),
-                                          bounds.bounding_corners[2].w);
-      bounds.bounding_corners[3] = float4(math::transform_direction(model_mat, p03), min_axis);
-
-      if ((infos.flag & OBJECT_NEGATIVE_SCALE) != 0) {
-        bounds.bounding_corners[0] += bounds.bounding_corners[1];
-        bounds.bounding_corners[1] = -bounds.bounding_corners[1];
-      }
-      if (bounds.bounding_sphere.w > 1e12f) {
-        bounds.bounding_sphere.w = -2.0f;
-      }
-
-      const float3 object_scale = float3(
-          math::reduce_add(math::abs(model_mat[0].xyz())),
-          math::reduce_add(math::abs(model_mat[1].xyz())),
-          math::reduce_add(math::abs(model_mat[2].xyz())));
-      if (math::reduce_min(math::abs(object_scale)) < 1e-10f) {
-        bounds.bounding_sphere.w = -2.0f;
-      }
-    }
-
-    const float3 loc = infos.orco_add;
-    const float3 size = infos.orco_mul;
-    const float3 orco_mul = math::safe_rcp(size * 2.0f);
-    infos.orco_add = (loc - size) * -orco_mul;
-    infos.orco_mul = orco_mul;
-  }
-#endif
-
   matrix_buf.current().push_update();
   bounds_buf.current().push_update();
   infos_buf.current().push_update();
@@ -234,7 +178,6 @@ void Manager::end_sync()
   DRW_submission_start();
 
   /* Dispatch compute to finalize the resources on GPU. Save a bit of CPU time. */
-#ifndef __ANDROID__
   uint thread_groups = divide_ceil_u(resource_len_, DRW_FINALIZE_GROUP_SIZE);
   gpu::Shader *shader = DRW_shader_draw_resource_finalize_get();
   GPU_shader_bind(shader);
@@ -244,7 +187,6 @@ void Manager::end_sync()
   GPU_storagebuf_bind(infos_buf.current(), GPU_shader_get_ssbo_binding(shader, "infos_buf"));
   GPU_compute_dispatch(shader, thread_groups, 1, 1);
   GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
-#endif
 
   DRW_submission_end();
 

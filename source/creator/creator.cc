@@ -6,9 +6,7 @@
  * \ingroup creator
  */
 
-#include <chrono>
 #include <cstdlib>
-#include <cstdio>
 #include <cstring>
 
 #ifdef WIN32
@@ -41,7 +39,6 @@
 #include "BLI_task_c.hh"
 #include "BLI_threads.hh"
 #include "BLI_utildefines.hh"
-#include "GPU_context.hh"
 
 /* Mostly initialization functions. */
 #include "BKE_appdir.hh"
@@ -77,6 +74,8 @@
 #include "ED_datafiles.h"
 
 #include "SEQ_modifier.hh"
+
+#include "COM_init.hh"
 
 #include "WM_api.hh"
 
@@ -330,30 +329,15 @@ extern "C" int GHOST_HACK_getFirstFile(char buf[]);
  * - run #WM_main() event loop,
  *   or exit immediately when running in background-mode.
  */
-#ifdef WITH_GHOST_ANDROID
-/* Android owns the frame loop; the NativeActivity glue calls this to init. */
-namespace blender {
-void GHOST_androidfinalize(bContext *C, GPUContext *gpu_ctx);
-int GHOST_android_launch(int argc, const char **argv);
-}  // namespace blender
-int blender::GHOST_android_launch(int argc, const char **argv)
-#else
 int main(int argc,
-#  ifdef USE_WIN32_UNICODE_ARGS
+#ifdef USE_WIN32_UNICODE_ARGS
          const char ** /*argv_c*/
-#  else
+#else
          const char **argv
-#  endif
-)
 #endif
+)
 {
   using namespace blender;
-
-#ifdef WITH_GHOST_ANDROID
-  fprintf(stderr, "[BlenderAndroid] creator: launch entered\n");
-  fflush(stderr);
-  const auto t_launch = std::chrono::steady_clock::now();
-#endif
 
   bContext *C;
 #ifndef WITH_PYTHON_MODULE
@@ -377,6 +361,11 @@ int main(int argc,
 #endif
 
   restore_ld_preload();
+
+  /* Use the v2 Level Zero adapter of the SYCL unified runtime. As a fix for #159584, the v1 Level
+   * Zero adapter is not included. While the Cycles oneAPI device sets this as well, we also need
+   * the environment variable for the use of Open Image Denoise in the compositor. */
+  BLI_setenv_if_new("SYCL_UR_USE_LEVEL_ZERO_V2", "1");
 
 #ifdef WIN32
 #  ifdef USE_WIN32_UNICODE_ARGS
@@ -502,14 +491,13 @@ int main(int argc,
   /* Initialize path to executable. */
   BKE_appdir_program_path_init(argv[0]);
 
-  #ifndef __ANDROID__
   BLI_threadapi_init();
-#endif
 
   BKE_blender_globals_init(); /* `blender.cc` */
 
   BKE_cpp_types_init();
   fn::multi_function::register_common_functions();
+  compositor::init();
   BKE_idtype_init();
   BKE_modifier_init();
   seq::modifiers_init();
@@ -540,8 +528,16 @@ int main(int argc,
    * since they impact `BKE_appdir` behavior. */
   BKE_appdir_init();
 
-  /* After parsing number of threads argument. */
-  BLI_task_scheduler_init();
+  /* After parsing number of threads argument.
+   *
+   * Denormal handling is not enabled for the Python module because just writing `import bpy`
+   * should not change the result of unrelated computations. */
+#ifdef WITH_PYTHON_MODULE
+  const bool use_flush_denormals_to_zero = false;
+#else
+  const bool use_flush_denormals_to_zero = true;
+#endif
+  BLI_task_scheduler_init(use_flush_denormals_to_zero);
 
   /* Initialize FFTW threading support. */
   fftw::initialize_float();
@@ -575,10 +571,6 @@ int main(int argc,
 
   /* Must be initialized after #BKE_appdir_init to account for color-management paths. */
   IMB_init();
-#ifdef WITH_GHOST_ANDROID
-  fprintf(stderr, "[BlenderAndroid] creator: image/color system ready\n");
-  fflush(stderr);
-#endif
   /* Keep after #ARG_PASS_SETTINGS since debug flags are checked. */
   MOV_init();
 
@@ -620,15 +612,7 @@ int main(int argc,
   BLI_args_parse(ba, ARG_PASS_SETTINGS_FORCE, nullptr, nullptr);
 #endif
 
-#ifdef WITH_GHOST_ANDROID
-  fprintf(stderr, "[BlenderAndroid] creator: entering WM_init\n");
-  fflush(stderr);
-#endif
   WM_init(C, argc, argv);
-#ifdef WITH_GHOST_ANDROID
-  fprintf(stderr, "[BlenderAndroid] creator: WM_init complete\n");
-  fflush(stderr);
-#endif
 
 #ifndef WITH_PYTHON
   fprintf(stderr,
@@ -688,30 +672,10 @@ int main(int argc,
     /* Shows the splash as needed. */
     WM_init_splash_on_startup(C);
 
-#ifdef WITH_GHOST_ANDROID
-    /* Return to the NativeActivity loop, which drives WM_main_loop_body. */
-    WM_main_entry(C);
-    {
-      const double init_ms = std::chrono::duration<double, std::milli>(
-                                 std::chrono::steady_clock::now() - t_launch)
-                                 .count();
-      fprintf(stderr, "[BlenderAndroid] creator: event loop ready (init %.1f ms)\n", init_ms);
-      fflush(stderr);
-    }
-    /* Hand the context to `android_main`, together with the GPU context the window
-     * was created with. The main loop runs on the glue thread, where the backend's
-     * active context is still null (`active_ctx` is thread_local and was only set
-     * here, on the init thread), so the loop adopts it explicitly before drawing.
-     * `GPU_context_active_get()` is read on this thread, where it is the one that
-     * `GPU_context_create()` set. */
-    GHOST_androidfinalize(C, GPU_context_active_get());
-  }
-#else
     WM_main(C);
   }
   /* Neither #WM_exit, #WM_main return, this quiets CLANG's `unreachable-code-return` warning. */
   BLI_assert_unreachable();
-#endif
 
 #endif /* !WITH_PYTHON_MODULE */
 

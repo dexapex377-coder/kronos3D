@@ -17,31 +17,6 @@
 
 #include "CLG_log.h"
 
-#ifdef __ANDROID__
-#  include <android/log.h>
-#  include <cstdarg>
-#  include <cstdlib>
-#  include <sys/system_properties.h>
-/* Per-submission tracing, several lines a frame, so off unless `debug.blender.log` is set. */
-static void vk_submit_log(const char *format, ...)
-{
-  static const bool enabled = []() {
-    char value[PROP_VALUE_MAX] = {};
-    return __system_property_get("debug.blender.log", value) > 0 && atoi(value) != 0;
-  }();
-  if (!enabled) {
-    return;
-  }
-  va_list args;
-  va_start(args, format);
-  __android_log_vprint(ANDROID_LOG_INFO, "blender-vksubmit", format, args);
-  va_end(args);
-}
-#  define VKSUBLOG(...) vk_submit_log(__VA_ARGS__)
-#else
-#  define VKSUBLOG(...) ((void)0)
-#endif
-
 namespace blender {
 
 static CLG_LogRef LOG = {"gpu.vulkan"};
@@ -128,44 +103,8 @@ void VKDevice::wait_for_timeline(TimelineValue timeline)
   }
   VkSemaphoreWaitInfo vk_semaphore_wait_info = {
       VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, nullptr, 0, 1, &vk_timeline_semaphore_, &timeline};
-  if (is_device_lost()) {
-    /* Nothing will ever signal this. Return so the caller unwinds and releases its locks. */
-    return;
-  }
-  /* Wait in slices rather than indefinitely: a wedged GPU is not always reported as
-   * VK_ERROR_DEVICE_LOST, and blocking forever here deadlocks callers holding the draw lock. */
-  const int max_attempts = 5;
-  VkResult wait_result;
-  for (int attempt = 0;; attempt++) {
-    wait_result = functions.vkWaitSemaphores(vk_device_, &vk_semaphore_wait_info, 2000000000ull);
-    if (wait_result != VK_TIMEOUT) {
-      break;
-    }
-    if (is_device_lost()) {
-      VKSUBLOG("wait ABORTED (device lost) want=%llu signalled=%llu",
-               (unsigned long long)timeline,
-               (unsigned long long)submission_finished_timeline_get());
-      return;
-    }
-    const TimelineValue signalled = submission_finished_timeline_get();
-    VKSUBLOG("wait STUCK want=%llu signalled=%llu allocated=%llu attempt=%d",
-             (unsigned long long)timeline,
-             (unsigned long long)signalled,
-             (unsigned long long)timeline_value_,
-             attempt);
-    if (attempt + 1 >= max_attempts) {
-      device_lost_.store(true, std::memory_order_relaxed);
-      CLOG_ERROR(&LOG,
-                 "Vulkan: GPU stopped making progress (waiting for %llu, signalled %llu). "
-                 "Treating the device as lost.",
-                 (unsigned long long)timeline,
-                 (unsigned long long)signalled);
-      VKSUBLOG("wait GIVING UP want=%llu signalled=%llu -> device marked lost",
-               (unsigned long long)timeline,
-               (unsigned long long)signalled);
-      return;
-    }
-  }
+  VkResult wait_result = functions.vkWaitSemaphoresKHR(
+      vk_device_, &vk_semaphore_wait_info, UINT64_MAX);
   if (wait_result != VK_SUCCESS) {
     CLOG_ERROR(
         &LOG, "Vulkan: failed to wait for synchronization timeline [%s]", to_string(wait_result));
@@ -250,7 +189,7 @@ void VKDevice::submission_runner(VKDevice *device)
 
       vk_command_buffer = command_buffers_unused.pop_last();
       command_buffer = std::make_optional<render_graph::VKCommandBufferWrapper>(
-          vk_command_buffer, device->functions, device->extensions_);
+          vk_command_buffer, device->functions, device->extensions_, device->workarounds_);
       command_buffer->begin_recording();
     }
 
@@ -264,26 +203,6 @@ void VKDevice::submission_runner(VKDevice *device)
     }
     command_builder.record_commands(render_graph, *command_buffer, node_handles);
     num_nodes += node_handles.size();
-
-#ifdef __ANDROID__
-    {
-      int counts[32] = {};
-      for (render_graph::NodeHandle handle : node_handles) {
-        counts[int(render_graph.nodes_[handle].type) & 31]++;
-      }
-      char buf[512];
-      int off = 0;
-      for (int t = 0; t < 32; t++) {
-        if (counts[t]) {
-          off += snprintf(buf + off, sizeof(buf) - off, "%d:%d ", t, counts[t]);
-        }
-      }
-      VKSUBLOG("graph timeline=%llu nodes=%d types[%s]",
-               (unsigned long long)submit_task->timeline,
-               int(node_handles.size()),
-               buf);
-    }
-#endif
 
     if (submit_task->submit_to_device) {
       /* Finalize current command buffer. */
@@ -319,39 +238,12 @@ void VKDevice::submission_runner(VKDevice *device)
                                      signal_semaphores};
 
       CLOG_TRACE(&LOG, "Submitting %u render graph nodes to device.", uint32_t(num_nodes));
-      const uint64_t submitted_nodes = num_nodes;
       num_nodes = 0;
 
-      if (device->is_device_lost()) {
-        /* Queue is dead; every further submit would fail. Skip it, but keep draining the
-         * task queue so waiters are released and command buffers are recycled. */
-        VKSUBLOG("submit timeline=%llu SKIPPED (device lost)",
-                 (unsigned long long)submit_task->timeline);
-      }
-      else {
+      {
         std::scoped_lock lock_queue(*device->queue_mutex_);
-        VkResult submit_result = device->functions.vkQueueSubmit(
+        device->functions.vkQueueSubmit(
             device->vk_queue_, 1, &vk_submit_info, submit_task->signal_fence);
-        VKSUBLOG(
-            "submit timeline=%llu nodes=%u waits_for=%llu signalled=%llu wait_sem=%p "
-            "signal_sem=%p res=%d",
-            (unsigned long long)submit_task->timeline,
-            uint32_t(submitted_nodes),
-            (unsigned long long)(submit_task->timeline - 1),
-            (unsigned long long)device->submission_finished_timeline_get(),
-            (void *)submit_task->wait_semaphore,
-            (void *)submit_task->signal_semaphore,
-            int(submit_result));
-        if (submit_result == VK_ERROR_DEVICE_LOST) {
-          /* The timeline semaphore will never advance again. Latch this so waiters give up
-           * instead of blocking forever while holding higher level locks. */
-          if (!device->device_lost_.exchange(true, std::memory_order_relaxed)) {
-            CLOG_ERROR(&LOG,
-                       "Vulkan: device lost on submission %llu; GPU work is no longer being "
-                       "executed.",
-                       (unsigned long long)submit_task->timeline);
-          }
-        }
       }
       if (submit_task->wait_for_submission != nullptr) {
         std::unique_lock<Mutex> lock(submit_task->wait_for_submission->is_submitted_mutex);

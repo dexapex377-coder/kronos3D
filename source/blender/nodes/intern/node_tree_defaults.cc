@@ -2,9 +2,14 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
+/** \file
+ * \ingroup nodes
+ */
+
 #include "DNA_material_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
+#include "DNA_pointcloud_types.h"
 #include "DNA_world_types.h"
 
 #include "BKE_context.hh"
@@ -37,6 +42,11 @@ void node_tree_shader_default(const bContext *C, Main *bmain, ID *id)
 
     if (ob && ob->type == OB_VOLUME) {
       ma_default = BKE_material_default_volume();
+    }
+    else if (ob && ob->type == OB_POINTCLOUD && ob->data &&
+             id_cast<const PointCloud *>(ob->data)->type == PointCloudType::GSplat)
+    {
+      ma_default = BKE_material_default_gsplat();
     }
     else {
       ma_default = BKE_material_default_surface();
@@ -102,26 +112,6 @@ void node_tree_shader_default(const bContext *C, Main *bmain, ID *id)
   }
 }
 
-void node_tree_composit_default(const bContext *C, Scene *sce)
-{
-  Main *bmain = CTX_data_main(C);
-
-  /* but lets check it anyway */
-  if (sce->compositing_node_group) {
-    if (G.debug & G_DEBUG) {
-      printf("error in composite initialize\n");
-    }
-    return;
-  }
-
-  sce->compositing_node_group = bke::node_tree_add_tree(
-      bmain, DATA_("Compositor Nodes"), ntreeType_Composite->idname.ref());
-
-  node_tree_composit_default_init(C, sce->compositing_node_group);
-
-  BKE_ntree_update_after_single_tree_change(*bmain, *sce->compositing_node_group);
-}
-
 void node_tree_composit_default_init(const bContext *C, bNodeTree *ntree)
 {
   BLI_assert(ntree != nullptr && ntree->type == NTREE_COMPOSIT);
@@ -143,11 +133,7 @@ void node_tree_composit_default_init(const bContext *C, bNodeTree *ntree)
   in->location[1] = 100.0f;
   bke::node_set_active(*ntree, *in);
 
-  bke::node_add_link(*ntree,
-                     *in,
-                     *reinterpret_cast<bNodeSocket *>(in->outputs.first),
-                     *composite,
-                     *reinterpret_cast<bNodeSocket *>(composite->inputs.first));
+  bke::node_add_link(*ntree, *in, *in->outputs.first(), *composite, *composite->inputs.first());
 
   BKE_ntree_update_after_single_tree_change(*CTX_data_main(C), *ntree);
 }

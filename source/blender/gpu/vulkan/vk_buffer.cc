@@ -13,10 +13,6 @@
 
 #include "CLG_log.h"
 
-#ifdef __ANDROID__
-#  include <android/log.h>
-#endif
-
 namespace blender {
 
 static CLG_LogRef LOG = {"gpu.vulkan"};
@@ -36,7 +32,8 @@ bool VKBuffer::create(size_t size_in_bytes,
                       VmaAllocationCreateFlags allocation_flags,
                       float priority,
                       bool export_memory,
-                      const char *debug_name)
+                      const char *debug_name,
+                      size_t alignment)
 {
   BLI_assert(!is_allocated());
   BLI_assert(resource_.vk_handle == VK_NULL_HANDLE);
@@ -50,7 +47,7 @@ bool VKBuffer::create(size_t size_in_bytes,
    * Vulkan doesn't allow empty buffers but some areas (DrawManager Instance data, PyGPU) create
    * them.
    */
-  alloc_size_in_bytes_ = ceil_to_multiple_ul(max_ulul(size_in_bytes_, 16), 16);
+  alloc_size_in_bytes_ = max_ulul(size_in_bytes_, 16);
   VKDevice &device = VKBackend::get().device;
 
   /* Precheck max buffer size. */
@@ -101,16 +98,14 @@ bool VKBuffer::create(size_t size_in_bytes,
     vma_create_info.pUserData = (void *)debug_name;
   }
 
-  VkResult result = vmaCreateBuffer(
-      allocator, &create_info, &vma_create_info, &resource_.vk_handle, &allocation_, nullptr);
+  VkResult result = vmaCreateBufferWithAlignment(allocator,
+                                                 &create_info,
+                                                 &vma_create_info,
+                                                 alignment,
+                                                 &resource_.vk_handle,
+                                                 &allocation_,
+                                                 nullptr);
   if (result != VK_SUCCESS) {
-#ifdef __ANDROID__
-    __android_log_print(ANDROID_LOG_ERROR,
-                        "blender-vkalloc",
-                        "vmaCreateBuffer FAILED res=%d size=%llu",
-                        int(result),
-                        (unsigned long long)create_info.size);
-#endif
     allocation_failed_ = true;
     size_in_bytes_ = 0;
     alloc_size_in_bytes_ = 0;
@@ -122,8 +117,8 @@ bool VKBuffer::create(size_t size_in_bytes,
   if (bool(create_info.usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)) {
     VkBufferDeviceAddressInfo vk_buffer_device_address_info = {
         VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, resource_};
-    vk_device_address = device.functions.vkGetBufferDeviceAddress(device.vk_handle(),
-                                                                  &vk_buffer_device_address_info);
+    vk_device_address = device.functions.vkGetBufferDeviceAddressKHR(
+        device.vk_handle(), &vk_buffer_device_address_info);
   }
 
   if (debug_name) {

@@ -21,14 +21,6 @@ struct VKBeginRenderingData {
   VkRenderingAttachmentInfo depth_attachment;
   VkRenderingAttachmentInfo stencil_attachment;
   VkRenderingInfoKHR vk_rendering_info;
-
-  /* Render-pass fallback (GPUs without VK_KHR_dynamic_rendering): attachment
-   * formats needed to synthesize a compatible VkRenderPass. Indexed the same as
-   * color_attachments; VK_FORMAT_UNDEFINED marks an unused slot. All Vulkan
-   * images in the backend are single-sample, so no resolve/sample data. */
-  VkFormat color_formats[8];
-  VkFormat depth_format;
-  VkFormat stencil_format;
 };
 
 struct VKBeginRenderingCreateInfo {
@@ -111,12 +103,7 @@ class VKBeginRenderingNode : public VKNodeInfo<VKNodeType::BEGIN_RENDERING,
     if (data.vk_rendering_info.pStencilAttachment) {
       data.vk_rendering_info.pStencilAttachment = &data.stencil_attachment;
     }
-    if (command_buffer.use_render_pass_fallback) {
-      begin_rendering_fallback(command_buffer, data);
-    }
-    else {
-      command_buffer.begin_rendering(&data.vk_rendering_info);
-    }
+    command_buffer.begin_rendering(&data.vk_rendering_info);
   }
 
   /**

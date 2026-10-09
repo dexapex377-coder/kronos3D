@@ -21,32 +21,6 @@
 #include "WM_api.hh"
 #include "wm_window.hh"
 
-#ifdef __ANDROID__
-#  include <android/log.h>
-#  include <pthread.h>
-#  include <cstdarg>
-#  include <cstdlib>
-#  include <sys/system_properties.h>
-/* Draw-lock tracing, off unless `debug.blender.log` is set. */
-static void drw_android_log(const char *format, ...)
-{
-  static const bool enabled = []() {
-    char value[PROP_VALUE_MAX] = {};
-    return __system_property_get("debug.blender.log", value) > 0 && atoi(value) != 0;
-  }();
-  if (!enabled) {
-    return;
-  }
-  va_list args;
-  va_start(args, format);
-  __android_log_vprint(ANDROID_LOG_INFO, "blender-drwlock", format, args);
-  va_end(args);
-}
-#  define DRWLOG(...) drw_android_log(__VA_ARGS__)
-#else
-#  define DRWLOG(...) ((void)0)
-#endif
-
 namespace blender {
 
 /* -------------------------------------------------------------------- */
@@ -73,16 +47,13 @@ void DRW_mutexes_exit()
 
 void DRW_lock_start()
 {
-  DRWLOG("lock_start enter tid=%lx", (unsigned long)pthread_self());
   bool locked = BLI_ticket_mutex_lock_check_recursive(draw_mutex);
-  DRWLOG("lock_start done tid=%lx locked=%d", (unsigned long)pthread_self(), int(locked));
   BLI_assert(locked);
   UNUSED_VARS_NDEBUG(locked);
 }
 
 void DRW_lock_end()
 {
-  DRWLOG("lock_end tid=%lx", (unsigned long)pthread_self());
   BLI_ticket_mutex_unlock(draw_mutex);
 }
 

@@ -38,9 +38,6 @@ class VKDescriptorPools {
   static constexpr uint32_t POOL_SIZE_INPUT_ATTACHMENT = 100;
   static constexpr uint32_t POOL_SIZE_ACCELERATION_STRUCTURE = 100;
 
-  /** Failed allocations left before giving up on a genuinely exhausted device heap. */
-  static constexpr int MAX_POOL_ALLOCATION_RETRIES = 4;
-
   /**
    * Unused recycled pools.
    *
@@ -53,8 +50,6 @@ class VKDescriptorPools {
   /** Active descriptor pool. Should always be a valid handle. */
   VkDescriptorPool vk_descriptor_pool_ = VK_NULL_HANDLE;
   Mutex mutex_;
-  /** Remaining pool-recovery retries for the current allocation recursion. */
-  int allocation_retries_ = MAX_POOL_ALLOCATION_RETRIES;
 
  public:
   ~VKDescriptorPools();
@@ -78,6 +73,5 @@ class VKDescriptorPools {
   void add_new_pool(const VKDevice &device);
   void discard_active_pool(VKContext &vk_context);
   void ensure_pool(const VKDevice &device);
-  VkDescriptorSet allocate_with_retries(const VkDescriptorSetLayout descriptor_set_layout);
 };
 }  // namespace blender::gpu

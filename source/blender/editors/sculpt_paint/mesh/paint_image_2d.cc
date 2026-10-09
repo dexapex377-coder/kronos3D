@@ -158,7 +158,7 @@ static BrushPainter *brush_painter_2d_new(Scene *scene,
   painter->scene = scene;
   painter->paint = paint;
   if (BKE_brush_color_jitter_get_settings(paint, brush)) {
-    painter->initial_hsv_jitter = seed_hsv_jitter();
+    painter->initial_hsv_jitter = BKE_paint_seed_hsv_jitter();
   }
   painter->firsttouch = true;
   painter->cache_invert = invert;
@@ -1192,7 +1192,13 @@ static ImBuf *paint_2d_lift_clone(ImBuf *ibuf, ImBuf *ibufb, const int *pos)
   clonebuf->color_mode = ibufb->color_mode;
 
   IMB_rectclip(clonebuf, ibuf, &destx, &desty, &srcx, &srcy, &w, &h);
+
+  uint8_t *clonebuf_byte_data = clonebuf->byte_data_for_write();
+  float *clonebuf_float_data = clonebuf->float_data_for_write();
+
   IMB_rectblend(clonebuf,
+                clonebuf_byte_data,
+                clonebuf_float_data,
                 clonebuf,
                 ibufb,
                 nullptr,
@@ -1210,6 +1216,8 @@ static ImBuf *paint_2d_lift_clone(ImBuf *ibuf, ImBuf *ibufb, const int *pos)
                 IMB_BLEND_COPY_ALPHA,
                 false);
   IMB_rectblend(clonebuf,
+                clonebuf_byte_data,
+                clonebuf_float_data,
                 clonebuf,
                 ibuf,
                 nullptr,
@@ -1239,6 +1247,8 @@ static void paint_2d_convert_brushco(ImBuf *ibufb, const float pos[2], int ipos[
 static void paint_2d_do_making_brush(ImagePaintState *s,
                                      ImagePaintTile *tile,
                                      ImagePaintRegion *region,
+                                     uint8_t *canvas_byte_data,
+                                     float *canvas_float_data,
                                      ImBuf *frombuf,
                                      float mask_max,
                                      short blend,
@@ -1259,18 +1269,21 @@ static void paint_2d_do_making_brush(ImagePaintState *s,
       int origx = region->destx - tx * ED_IMAGE_UNDO_TILE_SIZE;
       int origy = region->desty - ty * ED_IMAGE_UNDO_TILE_SIZE;
 
-      if (const ImBuf *data = ED_image_paint_tile_find(
-              undo_tiles, s->image, tile->canvas, &tile->iuser, tx, ty, &mask, false))
-      {
-        if (tile->canvas->float_data()) {
-          tmpbuf.float_buffer = data->float_buffer;
-        }
-        else {
-          tmpbuf.byte_buffer = data->byte_buffer;
-        }
+      const ImBuf *data = ED_image_paint_tile_find(
+          undo_tiles, s->image, tile->canvas, &tile->iuser, tx, ty, &mask, false);
+      if (data == nullptr) {
+        continue;
+      }
+      if (tile->canvas->float_data()) {
+        tmpbuf.float_buffer = data->float_buffer;
+      }
+      else {
+        tmpbuf.byte_buffer = data->byte_buffer;
       }
 
       IMB_rectblend(tile->canvas,
+                    canvas_byte_data,
+                    canvas_float_data,
                     &tmpbuf,
                     frombuf,
                     mask,
@@ -1295,6 +1308,8 @@ struct Paint2DForeachData {
   ImagePaintState *s;
   ImagePaintTile *tile;
   ImagePaintRegion *region;
+  uint8_t *canvas_byte_data;
+  float *canvas_float_data;
   ImBuf *frombuf;
   float mask_max;
   short blend;
@@ -1310,6 +1325,8 @@ static void paint_2d_op_foreach_do(void *__restrict data_v,
   paint_2d_do_making_brush(data->s,
                            data->tile,
                            data->region,
+                           data->canvas_byte_data,
+                           data->canvas_float_data,
                            data->frombuf,
                            data->mask_max,
                            data->blend,
@@ -1397,15 +1414,31 @@ static int paint_2d_op(void *state,
                             &tilew,
                             &tileh);
 
+      /* Acquire mutable data pointers outside of parallel loop. */
+      uint8_t *canvas_byte_data = canvas->byte_data_for_write();
+      float *canvas_float_data = canvas->float_data_for_write();
+
       if (tiley == tileh) {
-        paint_2d_do_making_brush(
-            s, tile, &region[a], frombuf, mask_max, blend, tilex, tiley, tilew, tileh);
+        paint_2d_do_making_brush(s,
+                                 tile,
+                                 &region[a],
+                                 canvas_byte_data,
+                                 canvas_float_data,
+                                 frombuf,
+                                 mask_max,
+                                 blend,
+                                 tilex,
+                                 tiley,
+                                 tilew,
+                                 tileh);
       }
       else {
         Paint2DForeachData data;
         data.s = s;
         data.tile = tile;
         data.region = &region[a];
+        data.canvas_byte_data = canvas_byte_data;
+        data.canvas_float_data = canvas_float_data;
         data.frombuf = frombuf;
         data.mask_max = mask_max;
         data.blend = blend;
@@ -1675,9 +1708,7 @@ void *paint_2d_new_stroke(bContext *C, wmOperator *op, const BrushStrokeMode mod
   /* Initialize offsets here, they're needed for the uv space clip test before lazy-loading the
    * tile properly. */
   int tile_idx = 0;
-  for (ImageTile *tile = static_cast<ImageTile *>(s->image->tiles.first); tile;
-       tile = tile->next, tile_idx++)
-  {
+  for (ImageTile *tile = s->image->tiles.first(); tile; tile = tile->next, tile_idx++) {
     s->tiles[tile_idx].iuser.tile = tile->tile_number;
     s->tiles[tile_idx].uv_origin[0] = ((tile->tile_number - 1001) % 10);
     s->tiles[tile_idx].uv_origin[1] = ((tile->tile_number - 1001) / 10);
@@ -1748,7 +1779,7 @@ void paint_2d_redraw(const bContext *C, void *ps, bool final)
   }
 }
 
-void paint_2d_stroke_done(void *ps)
+void paint_2d_stroke_done(void *ps, wmPaintCursor *cursor)
 {
   ImagePaintState *s = static_cast<ImagePaintState *>(ps);
 
@@ -1761,6 +1792,7 @@ void paint_2d_stroke_done(void *ps)
   paint_brush_exit_tex(s->brush);
 
   MEM_delete(s);
+  WM_paint_cursor_end(cursor);
 }
 
 static void paint_2d_fill_add_pixel_byte(const int x_px,

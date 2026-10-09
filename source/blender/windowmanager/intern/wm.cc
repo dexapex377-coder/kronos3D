@@ -13,14 +13,7 @@
 /* Allow using deprecated functionality for .blend file I/O. */
 #define DNA_DEPRECATED_ALLOW
 
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-
-#ifdef __ANDROID__
-#  include <sys/system_properties.h>
-#endif
 
 #include "DNA_ID_enums.h"
 #include "DNA_layer_types.h"
@@ -71,118 +64,6 @@
 #include "BLO_read_write.hh"
 
 namespace blender {
-
-namespace {
-
-/* Windowed frame-time probe. Prints average loop and draw milliseconds plus the implied frame
- * rate to stdout every `window` frames. On Android stdout lands in logcat under tag "blender",
- * so: `setprop debug.blender.perf 1` (or set BLENDER_PERF=1) and watch `adb logcat -s blender`.
- * Off by default -- the chrono calls themselves are the only cost when it is off.
- *
- * `loop` is one WM_main_loop_body (events + notifiers + draw + swap, so it includes the vsync
- * block of the frame it painted). `draw` is just the wm_draw_update part. Comparing the two
- * shows where the frame went: when `draw ~= loop` the GPU/window drawing dominates; a `loop`
- * that is large while `draw` is tiny points at event/notifier CPU work.
- */
-struct FramePerfProbe {
-  static constexpr int window = 30;
-
-  static bool enabled()
-  {
-    /* Mirror `blender::perf::enabled()`: an empty or "0" value in the environment must NOT
-     * short-circuit the Android system-property fallback, or the probe never turns on when the
-     * sandbox exports BLENDER_PERF="" (as Android's app-process env often has). */
-    static const bool on = []() {
-      if (const char *env = getenv("BLENDER_PERF")) {
-        if (atoi(env) != 0) {
-          return true;
-        }
-      }
-#ifdef __ANDROID__
-      char value[PROP_VALUE_MAX] = {};
-      if (__system_property_get("debug.blender.perf", value) > 0 && value[0] != '\0') {
-        return atoi(value) != 0;
-      }
-#endif
-      return false;
-    }();
-    return on;
-  }
-
-  void frame_begin()
-  {
-    frame_begin_ = std::chrono::steady_clock::now();
-  }
-
-  void before_draw()
-  {
-    draw_begin_ = std::chrono::steady_clock::now();
-  }
-
-  void report()
-  {
-    const double loop_ms = elapsed_ms(frame_begin_);
-    const double draw_ms = elapsed_ms(draw_begin_);
-    loop_ms_sum_ += loop_ms;
-    draw_ms_sum_ += draw_ms;
-    count_++;
-    /* Keep tables warm even while nothing happens: reset per-window regardless. */
-    if (count_ < window) {
-      return;
-    }
-    const double window_s = loop_ms_sum_ / 1000.0;
-    printf("[perf] %.1f frame/s avg | loop %.2f ms | draw %.2f ms | (last %d)\n",
-           window / (window_s > 0.0 ? window_s : 1e-9),
-           loop_ms_sum_ / double(window),
-           draw_ms_sum_ / double(window),
-           window);
-    count_ = 0;
-    loop_ms_sum_ = 0.0;
-    draw_ms_sum_ = 0.0;
-  }
-
- private:
-  static double elapsed_ms(const std::chrono::steady_clock::time_point since)
-  {
-    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since)
-        .count();
-  }
-
-  std::chrono::steady_clock::time_point frame_begin_;
-  std::chrono::steady_clock::time_point draw_begin_;
-  double loop_ms_sum_ = 0.0;
-  double draw_ms_sum_ = 0.0;
-  int count_ = 0;
-};
-
-struct FramePerfScope {
-  FramePerfProbe probe;
-  bool on;
-
-  FramePerfScope()
-  {
-    on = FramePerfProbe::enabled();
-    if (on) {
-      probe.frame_begin();
-    }
-  }
-
-  void before_draw()
-  {
-    if (on) {
-      probe.before_draw();
-    }
-  }
-
-  void report()
-  {
-    if (on) {
-      probe.report();
-    }
-  }
-};
-
-}  // namespace
 
 /* ****************************************************** */
 
@@ -239,7 +120,15 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
 
   wm->runtime = nullptr;
 
-  writer->write_id_struct(id_address, wm);
+  writer->write_id_struct(id_address, wm, [](BlendStructWriter<wmWindowManager> &struct_writer) {
+    wmWindowManager &shallow_wm = struct_writer.shallow_data;
+    shallow_wm.init_flag = {};
+    shallow_wm.op_undo_depth = 0;
+    shallow_wm.outliner_sync_select_dirty = {};
+    shallow_wm.extensions_updates = {};
+    shallow_wm.extensions_blocked = 0;
+    shallow_wm.autosave_scheduled = 0;
+  });
   BKE_id_blend_write(writer, &wm->id);
   write_wm_xr_data(writer, &wm->xr);
 
@@ -247,7 +136,19 @@ static void window_manager_blend_write(BlendWriter *writer, ID *id, const void *
     /* Update deprecated screen member (for so loading in 2.7x uses the correct screen). */
     win.screen = BKE_workspace_active_screen_get(win.workspace_hook);
 
-    writer->write_struct(&win);
+    writer->write_struct(&win, [](BlendStructWriter<wmWindow> &struct_writer) {
+      wmWindow &shallow_win = struct_writer.shallow_data;
+      shallow_win.active = 0;
+      shallow_win.grabcursor = 0;
+      shallow_win.addmousemove = 0;
+      shallow_win.event_queue_check_click = 0;
+      shallow_win.event_queue_check_drag = 0;
+      shallow_win.event_queue_check_drag_handled = 0;
+      shallow_win.event_queue_consecutive_gesture_type = 0;
+      shallow_win.event_queue_consecutive_gesture_xy[0] = 0;
+      shallow_win.event_queue_consecutive_gesture_xy[1] = 0;
+      shallow_win.event_queue_consecutive_gesture_data = nullptr;
+    });
     writer->write_struct(win.workspace_hook);
     writer->write_struct(win.stereo3d_format);
 
@@ -357,6 +258,7 @@ IDTypeInfo IDType_ID_WM = {
     .foreach_cache = nullptr,
     .foreach_path = nullptr,
     .foreach_working_space_color = nullptr,
+    .foreach_asset_weak_reference = nullptr,
     .owner_pointer_get = nullptr,
 
     .blend_write = window_manager_blend_write,
@@ -394,9 +296,9 @@ void WM_operator_free(wmOperator *op)
     MEM_delete(op->reports);
   }
 
-  if (op->macro.first) {
+  if (op->macro.first()) {
     wmOperator *opm, *opmnext;
-    for (opm = static_cast<wmOperator *>(op->macro.first); opm; opm = opmnext) {
+    for (opm = op->macro.first(); opm; opm = opmnext) {
       opmnext = opm->next;
       WM_operator_free(opm);
     }
@@ -430,7 +332,7 @@ void WM_operator_type_set(wmOperator *op, wmOperatorType *ot)
 
     WM_operator_properties_default(&ptr, false);
 
-    if (ptr.data) {
+    if (ptr) {
       IDP_SyncGroupTypes(op->properties, static_cast<const IDProperty *>(ptr.data), true);
     }
 
@@ -500,7 +402,7 @@ void WM_operator_handlers_clear(wmWindowManager *wm, const Set<wmOperatorType *>
     for (ScrArea &area : screen->areabase) {
       switch (area.spacetype) {
         case SPACE_FILE: {
-          SpaceFile *sfile = static_cast<SpaceFile *>(area.spacedata.first);
+          SpaceFile *sfile = area.spacedata.first_as<SpaceFile>();
           if (sfile->op && types.contains(sfile->op->type)) {
             /* Freed as part of the handler. */
             sfile->op = nullptr;
@@ -593,7 +495,7 @@ void WM_check(bContext *C)
 
   /* WM context. */
   if (wm == nullptr) {
-    wm = static_cast<wmWindowManager *>(bmain->wm.first);
+    wm = bmain->wm.first();
     CTX_wm_manager_set(C, wm);
   }
 
@@ -634,7 +536,7 @@ void wm_clear_default_size(bContext *C)
 
   /* WM context. */
   if (wm == nullptr) {
-    wm = static_cast<wmWindowManager *>(CTX_data_main(C)->wm.first);
+    wm = CTX_data_main(C)->wm.first();
     CTX_wm_manager_set(C, wm);
   }
 
@@ -720,39 +622,28 @@ void wm_close_and_free(bContext *C, wmWindowManager *wm)
   MEM_delete(wm->runtime);
 }
 
-void WM_main_entry(bContext *C)
-{
-  /* Single refresh before handling events.
-   * This ensures we don't run operators before the depsgraph has been evaluated. */
-  wm_event_do_refresh_wm_and_depsgraph(C);
-}
-
-void WM_main_loop_body(bContext *C)
-{
-  FramePerfScope perf;
-  /* Get events from ghost, handle window events, add to window queues. */
-  wm_window_events_process(C);
-
-  /* Per window, all events to the window, screen, area and region handlers. */
-  wm_event_do_handlers(C);
-
-  /* Events have left notes about changes, we handle and cache it. */
-  wm_event_do_notifiers(C);
-
-  /* Execute cached changes draw. */
-  perf.before_draw();
-  wm_draw_update(C);
-  perf.report();
-
-  PRF_frame_mark;
-}
-
 void WM_main(bContext *C)
 {
   PRF_scope(ProfileCategory::Core);
-  WM_main_entry(C);
+  /* Single refresh before handling events.
+   * This ensures we don't run operators before the depsgraph has been evaluated. */
+  wm_event_do_refresh_wm_and_depsgraph(C);
+
   while (true) {
-    WM_main_loop_body(C);
+
+    /* Get events from ghost, handle window events, add to window queues. */
+    wm_window_events_process(C);
+
+    /* Per window, all events to the window, screen, area and region handlers. */
+    wm_event_do_handlers(C);
+
+    /* Events have left notes about changes, we handle and cache it. */
+    wm_event_do_notifiers(C);
+
+    /* Execute cached changes draw. */
+    wm_draw_update(C);
+
+    PRF_frame_mark;
   }
 }
 

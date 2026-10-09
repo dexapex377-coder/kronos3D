@@ -52,10 +52,6 @@ void allocate([[resource_table]] PageAllocator &allocator,
     }
     tile_start += lod_len;
   }
-
-  if (local_tile == 0u) {
-    atomicAdd(allocator.pages_infos_buf._pad0, 1);
-  }
 }
 
 PipelineCompute page_allocate(allocate);

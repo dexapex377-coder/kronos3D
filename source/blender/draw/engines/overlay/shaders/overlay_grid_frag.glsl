@@ -7,8 +7,8 @@
 FRAGMENT_SHADER_CREATE_INFO(overlay_grid_next)
 
 #include "draw_view_lib.glsl"
-#include "gpu_shader_math_base_lib.glsl"
-#include "gpu_shader_utildefines_lib.glsl"
+#include "gpu_shader_math_base.bsl.hh"
+#include "gpu_shader_utildefines.bsl.hh"
 #include "overlay_common_lib.glsl"
 #include "overlay_grid_common_lib.glsl"
 
@@ -105,11 +105,7 @@ void main()
   /* Grid iteration additive alpha in perspective view; lower iterations
    * are given stronger alpha to minimize pop-in of upper iterations. */
   if (drw_view_is_perspective()) {
-    /* Select explicitly; dynamic indexing miscompiles on some drivers (Adreno). */
-    float additive_alpha = (grid_iter == 0) ? 1.0f :
-                           (grid_iter == 1) ? 0.50f :
-                           (grid_iter == 2) ? 0.25f :
-                                              0.125f;
-    out_color.a *= additive_alpha;
+    constexpr float additive_alpha[OVERLAY_GRID_ITER_LEN] = {1.0f, 0.50f, 0.25f, 0.125f};
+    out_color.a *= additive_alpha[grid_iter];
   }
 }

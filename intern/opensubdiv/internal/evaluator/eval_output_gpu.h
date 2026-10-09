@@ -11,10 +11,8 @@
 #include "internal/evaluator/gpu_compute_evaluator.h"
 #include "internal/evaluator/gpu_patch_table.hh"
 
-#ifdef WITH_OPENGL_BACKEND
-#  include <opensubdiv/osd/glPatchTable.h>
-#  include <opensubdiv/osd/glVertexBuffer.h>
-#endif
+#include <opensubdiv/osd/glPatchTable.h>
+#include <opensubdiv/osd/glVertexBuffer.h>
 
 #include "gpu_vertex_buffer_wrapper.hh"
 

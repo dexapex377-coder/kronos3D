@@ -22,8 +22,7 @@ class VKSampler : public NonCopyable {
 
  public:
   virtual ~VKSampler();
-  /** `no_linear_filter` forces nearest filtering and mip selection, keeping the LOD range. */
-  void create(const GPUSamplerState &sampler_state, bool no_linear_filter = false);
+  void create(const GPUSamplerState &sampler_state);
   void free();
 
   VkSampler vk_handle() const

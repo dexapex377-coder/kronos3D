@@ -104,7 +104,7 @@ Array<float2> polyline_fit_curve(Span<float2> points,
 
   Array<int32_t> indices(corner_mask.size());
   corner_mask.to_indices(indices.as_mutable_span());
-  uint *indicies_ptr = corner_mask.is_empty() ? nullptr : reinterpret_cast<uint *>(indices.data());
+  uint *indices_ptr = corner_mask.is_empty() ? nullptr : reinterpret_cast<uint *>(indices.data());
 
   float *cubic_array;
   uint cubic_array_len;
@@ -113,7 +113,7 @@ Array<float2> polyline_fit_curve(Span<float2> points,
                                            2,
                                            error_threshold,
                                            CURVE_FIT_CALC_HIGH_QUALITY,
-                                           indicies_ptr,
+                                           indices_ptr,
                                            indices.size(),
                                            &cubic_array,
                                            &cubic_array_len,
@@ -326,13 +326,11 @@ bke::CurvesGeometry curves_merge_by_distance(const bke::CurvesGeometry &src_curv
 
     bke::GSpanAttributeWriter dst_attribute = dst_attributes.lookup_or_add_for_write_only_span(
         iter.name, bke::AttrDomain::Point, iter.data_type);
-    threading::parallel_for(dst_curves.points_range(), 1024, [&](IndexRange range) {
-      bke::attribute_math::mix_groups(GVArraySpan(src_attribute.varray),
-                                      map_offsets.slice(range),
-                                      merge_map_indices,
-                                      std::nullopt,
-                                      dst_attribute.span.slice(range));
-    });
+    bke::attribute_math::mix_groups(GVArraySpan(src_attribute.varray),
+                                    map_offsets,
+                                    merge_map_indices,
+                                    std::nullopt,
+                                    dst_attribute.span);
     dst_attribute.finish();
   });
 

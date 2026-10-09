@@ -425,21 +425,6 @@ class CommandBufferLog : public VKCommandBufferInterface {
     log_.append(ss.str());
   }
 
-  void begin_render_pass(VkRenderPass /*vk_render_pass*/,
-                         VkFramebuffer /*vk_framebuffer*/,
-                         const VkRect2D & /*render_area*/,
-                         Span<VkClearValue> /*clear_values*/) override
-  {
-    EXPECT_TRUE(is_recording_);
-    log_.append("begin_render_pass()");
-  }
-
-  void end_render_pass() override
-  {
-    EXPECT_TRUE(is_recording_);
-    log_.append("end_render_pass()");
-  }
-
   void begin_query(VkQueryPool /*vk_query_pool*/,
                    uint32_t /*query_index*/,
                    VkQueryControlFlags /*vk_query_control_flags*/) override

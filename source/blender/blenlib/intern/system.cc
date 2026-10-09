@@ -73,9 +73,8 @@ int BLI_cpu_support_sse2()
 void BLI_system_backtrace_with_os_info(FILE *fp, const void * /*os_info*/)
 {
   /* ----------------------- */
-  /* If system as execinfo.h (bionic's backtrace needs API 33; Android has its
-   * own tombstone back-traces, so use the no-op path there). */
-#  if defined(HAVE_EXECINFO_H) && !defined(__ANDROID__)
+  /* If system as execinfo.h */
+#  if defined(HAVE_EXECINFO_H)
 
 #    define SIZE 100
   void *buffer[SIZE];
@@ -234,7 +233,7 @@ void BLI_system_max_open_files_ensure()
     ok = _setmaxstdio(max_open_files) == max_open_files;
   }
 #else
-  struct rlimit limit;
+  rlimit limit;
   ok = getrlimit(RLIMIT_NOFILE, &limit) == 0;
   if (ok && limit.rlim_cur < rlim_t(max_open_files)) {
     limit.rlim_cur = std::min(rlim_t(max_open_files), limit.rlim_max);

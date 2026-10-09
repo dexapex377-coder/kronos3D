@@ -374,13 +374,6 @@ static void pystatus_exit_on_error(const PyStatus &status)
 void BPY_python_start(bContext *C, int argc, const char **argv)
 {
 #ifndef WITH_PYTHON_MODULE
-#  ifdef __ANDROID__
-#    define BPY_ANDROID_INIT_LOG(message) \
-      fprintf(stderr, "[BlenderAndroid] Python init: %s\n", message)
-#  else
-#    define BPY_ANDROID_INIT_LOG(message) ((void)0)
-#  endif
-
   BLI_assert_msg(Py_IsInitialized() == 0, "Python has already been initialized");
 
   /* It's necessary to disable isolation so `user-site-packages` can be used.
@@ -434,16 +427,12 @@ void BPY_python_start(bContext *C, int argc, const char **argv)
     /* Note that there is no reason to call #Py_PreInitializeFromBytesArgs here
      * as this is only used so that command line arguments can be handled by Python itself,
      * not for setting `sys.argv` (handled below). */
-    BPY_ANDROID_INIT_LOG("Py_PreInitialize begin");
     status = Py_PreInitialize(&preconfig);
-    BPY_ANDROID_INIT_LOG("Py_PreInitialize complete");
     pystatus_exit_on_error(status);
   }
 
   /* Must run before python initializes, but after #PyPreConfig. */
-  BPY_ANDROID_INIT_LOG("PyImport_ExtendInittab begin");
   PyImport_ExtendInittab(bpy_internal_modules);
-  BPY_ANDROID_INIT_LOG("PyImport_ExtendInittab complete");
 
   /* #PyConfig (initialize Python). */
   {
@@ -593,9 +582,7 @@ void BPY_python_start(bContext *C, int argc, const char **argv)
     }
 
     /* Initialize Python (also acquires lock). */
-    BPY_ANDROID_INIT_LOG("Py_InitializeFromConfig begin");
     status = Py_InitializeFromConfig(&config);
-    BPY_ANDROID_INIT_LOG("Py_InitializeFromConfig complete");
     PyConfig_Clear(&config);
 
     pystatus_exit_on_error(status);
@@ -623,10 +610,6 @@ void BPY_python_start(bContext *C, int argc, const char **argv)
   // PyImport_ExtendInittab(bpy_internal_modules);
 
 #endif /* WITH_PYTHON_MODULE */
-
-#ifdef __ANDROID__
-#  undef BPY_ANDROID_INIT_LOG
-#endif
 
   bpy_intern_string_init();
 
@@ -843,9 +826,7 @@ void BPY_modules_load_user(bContext *C)
 
   bpy_context_set(C, &gilstate);
 
-  for (text = static_cast<Text *>(bmain->texts.first); text;
-       text = static_cast<Text *>(text->id.next))
-  {
+  for (text = bmain->texts.first(); text; text = static_cast<Text *>(text->id.next)) {
     if (text->flags & TXT_ISSCRIPT) {
       if (!(G.f & G_FLAG_SCRIPT_AUTOEXEC)) {
         if (!(G.f & G_FLAG_SCRIPT_AUTOEXEC_FAIL_QUIET)) {

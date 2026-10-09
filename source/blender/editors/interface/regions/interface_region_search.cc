@@ -10,7 +10,6 @@
 
 #include "MEM_guardedalloc.h"
 
-#include <climits>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
@@ -90,60 +89,6 @@ struct uiSearchboxData {
   bool use_shortcut_sep;
   int prv_rows, prv_cols;
   /**
-   * Touch: how many result rows this box actually holds, which is not always #SEARCH_ITEMS.
-   *
-   * A phone can leave the box less room than ten rows want -- the on-screen keyboard takes the
-   * bottom of the screen, and a window in Android's split screen takes half of what is left. The
-   * row height is the box divided by this, so a fixed ten in a short box is ten squeezed rows
-   * rather than a few readable ones. Everything else follows from #SearchItems::maxitem being set
-   * to match: the gather stops there, so `totitem` never exceeds it.
-   */
-  int rows;
-  /**
-   * Row height and the band at each end, in region pixels, settled once by the layout.
-   *
-   * Kept rather than recomputed because #searchbox_butrect is called from both sides of the touch
-   * menu scale: the layout and the draw hold it, the event handling does not. Both `UI_UNIT_Y` and
-   * `UI_SEARCHBOX_TRIA_H` are scale-dependent, so working them out again at hit-test time measured
-   * rows at less than half the height they were drawn at -- a tap landed three rows below the one
-   * it was aimed at. Pixels settled once cannot disagree with themselves.
-   */
-  int row_h;
-  int tria_h;
-  /**
-   * Touch: the press a drag belongs to, and how many rows it has stepped so far.
-   *
-   * A finger or a stylus scrolls this list by dragging it, which arrives as plain motion with a
-   * button held -- the press and release themselves go to the button, not here. The release is
-   * what resets the run, through #searchbox_drag_consume_release, so a new drag is told from the
-   * continuation of the last one without ever needing to see a press.
-   */
-  /**
-   * Where the last motion left the hand, or #INT_MIN between drags.
-   *
-   * Incremental on purpose. Measuring instead from the press, through `prev_press_xy`, put the
-   * list a screenful away on the very first event: that field can still hold the *previous* press
-   * when the first motion of a new one arrives, and a distance measured from there is applied all
-   * at once. Following the movement between one motion event and the next cannot jump, whatever
-   * the press says.
-   */
-  int drag_last_y;
-  /** Movement not yet worth a row, and total travel, which is what tells a drag from a tap. */
-  int drag_accum;
-  int drag_travel;
-  /** Whether the hand has moved far enough to mean it, whether or not the list could move. */
-  bool drag_active;
-  /**
-   * Whether a button is down inside the list, which is the only state a drag can begin from.
-   *
-   * Set by the press and cleared by the release, both of which reach the button rather than this
-   * region -- hence #searchbox_drag_press and #searchbox_drag_consume_release. Asking the event
-   * instead, through `prev_press_type`, does not work: that field names the last press there ever
-   * was, so after any click it keeps saying LEFTMOUSE, and a mouse merely crossing the list or a
-   * stylus merely hovering over it scrolled as though it were being dragged.
-   */
-  bool drag_armed;
-  /**
    * Show the active icon and text after the last instance of this string.
    * Used so we can show leading text to menu items less prominently (not related to 'use_sep').
    */
@@ -155,22 +100,6 @@ struct uiSearchboxData {
 };
 
 #define SEARCH_ITEMS 10
-/**
- * Touch: the fewest rows worth showing when the room is short.
- *
- * Below two the box stops being a list and becomes a single answer with no context, at which
- * point the search field alone would serve better. Two is also what keeps the arrows meaningful:
- * one row cannot be scrolled past.
- */
-#define SEARCH_ROWS_MIN 2
-
-/** How many whole rows fit in `height`, within the range worth drawing. */
-static int searchbox_rows_for_height(const int height)
-{
-  const int rows = (height - 2 * UI_SEARCHBOX_TRIA_H) / UI_UNIT_Y;
-  return std::clamp(rows, SEARCH_ROWS_MIN, SEARCH_ITEMS);
-}
-
 
 bool search_item_add(SearchItems *items,
                      const StringRef name,
@@ -242,11 +171,6 @@ bool search_item_add(SearchItems *items,
 int searchbox_size_y()
 {
   return SEARCH_ITEMS * UI_UNIT_Y + 2 * UI_SEARCHBOX_TRIA_H;
-}
-
-int searchbox_size_y_fit(const int height_max)
-{
-  return searchbox_rows_for_height(height_max) * UI_UNIT_Y + 2 * UI_SEARCHBOX_TRIA_H;
 }
 
 int searchbox_size_x()
@@ -362,10 +286,7 @@ static void searchbox_select(bContext *C, ARegion *region, Button *but, int step
 
 static void searchbox_butrect(rcti *r_rect, uiSearchboxData *data, int itemnr)
 {
-  /* Touch: the settled pixels, not the constants they came from. This runs from both sides of the
-   * menu scale -- the draw holds it, the hit test on a release does not -- and both `UI_UNIT_Y`
-   * and `UI_SEARCHBOX_TRIA_H` move with it. See #uiSearchboxData::row_h. */
-  const float tria_h = data->tria_h;
+  const float tria_h = data->zoom * UI_SEARCHBOX_TRIA_H;
 
   /* thumbnail preview */
   if (data->preview) {
@@ -386,7 +307,7 @@ static void searchbox_butrect(rcti *r_rect, uiSearchboxData *data, int itemnr)
   }
   /* list view */
   else {
-    const float buth = float(data->row_h);
+    const float buth = (BLI_rcti_size_y(&data->bbox) - 2.0f * tria_h) / SEARCH_ITEMS;
 
     *r_rect = data->bbox;
 
@@ -469,155 +390,10 @@ static ARegion *wm_searchbox_tooltip_init(
       searchbox_butrect(&rect, data, data->active);
 
       return search_but->item_tooltip_fn(
-          C, region, &rect, search_but->arg, search_but->item_active);
+          C, region, &rect, search_but->arg.get(), search_but->item_active);
     }
   }
   return nullptr;
-}
-
-/**
- * Touch: scroll the list by dragging it, and say whether the drag took the event.
- *
- * The press and the release belong to the button -- they are what picks an item -- so this only
- * ever sees motion, and reads `prev_press_xy` to know where the finger took hold. A drag that has
- * not yet crossed a row is not a drag at all, which is what leaves a tap free to select.
- *
- * It moves the view and leaves the selection alone, which is the difference between this and the
- * wheel. #searchbox_select() steps the highlight and only shifts the list once that highlight has
- * run into an end, so driving a drag through it made the selection race down the list while the
- * list itself sat still and then lurched -- fast, and impossible to aim. Moving `items.offset` by
- * hand is one row of list per row of finger, which is what a drag is supposed to be.
- *
- * The ends are `offset` and `more`: the list never knows how many results there are in total, only
- * whether there is another one past the last it fetched.
- */
-static bool searchbox_touch_scroll(
-    bContext *C, ARegion *region, Button *but, uiSearchboxData *data, const wmEvent *event)
-{
-  /* Only ever from a button actually held down inside the list: see #drag_armed. A mouse crossing
-   * the list and a stylus hovering over it both arrive as plain motion, and neither is a drag. */
-  if (!data->drag_armed || data->preview) {
-    return false;
-  }
-
-  /* First motion of a new hold. The release clears this back to the sentinel, which is a more
-   * reliable mark than the press position: it always arrives, and it arrives exactly once. */
-  if (data->drag_last_y == INT_MIN) {
-    data->drag_last_y = event->xy[1];
-    data->drag_accum = 0;
-    data->drag_travel = 0;
-    data->drag_active = false;
-    return false;
-  }
-
-  const int delta = event->xy[1] - data->drag_last_y;
-  data->drag_last_y = event->xy[1];
-  data->drag_travel += abs(delta);
-
-  rcti row;
-  searchbox_butrect(&row, data, 0);
-  const int row_h = BLI_rcti_size_y(&row);
-  if (row_h <= 0) {
-    return false;
-  }
-
-  if (!data->drag_active) {
-    /* A tap has to reach the item the way it always did, so nothing moves until the hand has
-     * travelled far enough to mean it. Counted from what has actually been seen rather than from
-     * the press, so a stale press position cannot start a drag the user never made.
-     *
-     * Half a row rather than the drag threshold, which is a few pixels: a finger always wobbles
-     * on the way down, and a wobble that counted as a drag ate the release -- the tap then chose
-     * nothing at all, which is the worst of the three things a tap can do. */
-    if (data->drag_travel < std::max(WM_event_drag_threshold(event), row_h / 2)) {
-      return false;
-    }
-    data->drag_active = true;
-    data->drag_accum = 0;
-  }
-
-  /* The content follows the finger, the same way and the same sign as the pull-down menus:
-   * window coordinates put y upwards, so dragging up raises the offset and brings the later
-   * results into view, as though the list itself were being pulled. */
-  data->drag_accum += delta;
-  while (abs(data->drag_accum) >= row_h) {
-    const int direction = (data->drag_accum > 0) ? 1 : -1;
-    if (direction > 0) {
-      if (!data->items.more) {
-        /* The last result is showing. Draining the movement rather than keeping it means the
-         * hand does not have to give back everything it pushed past the end. */
-        data->drag_accum = 0;
-        break;
-      }
-      data->items.offset++;
-    }
-    else {
-      if (data->items.offset == 0) {
-        data->drag_accum = 0;
-        break;
-      }
-      data->items.offset--;
-    }
-    data->drag_accum -= direction * row_h;
-    searchbox_update(C, region, but, false);
-  }
-
-  /* The window of results moved under it, so keep the highlight on something that exists. */
-  if (data->items.totitem == 0) {
-    data->active = -1;
-  }
-  else {
-    data->active = std::clamp(data->active, 0, data->items.totitem - 1);
-  }
-
-  ED_region_tag_redraw(region);
-  return true;
-}
-
-bool searchbox_select_at(ARegion *region, const int xy[2])
-{
-  uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
-  if (data == nullptr || data->preview) {
-    return false;
-  }
-  const int items_shown = std::min(data->items.totitem, data->rows);
-  for (int a = 0; a < items_shown; a++) {
-    rcti rect;
-    searchbox_butrect(&rect, data, a);
-    if (BLI_rcti_isect_pt(&rect, xy[0] - region->winrct.xmin, xy[1] - region->winrct.ymin)) {
-      data->active = a;
-      return true;
-    }
-  }
-  return false;
-}
-
-void searchbox_drag_press(ARegion *region)
-{
-  uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
-  if (data == nullptr) {
-    return;
-  }
-  data->drag_armed = true;
-  data->drag_active = false;
-  data->drag_accum = 0;
-  data->drag_travel = 0;
-  data->drag_last_y = INT_MIN;
-}
-
-bool searchbox_drag_consume_release(ARegion *region)
-{
-  uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
-  if (data == nullptr) {
-    return false;
-  }
-  const bool dragged = data->drag_active;
-  data->drag_armed = false;
-  data->drag_active = false;
-  data->drag_accum = 0;
-  data->drag_travel = 0;
-  data->drag_last_y = INT_MIN;
-  return dragged;
 }
 
 bool searchbox_event(
@@ -659,7 +435,7 @@ bool searchbox_event(
             {
 
               void *active = data->items.pointers[data->active];
-              if (search_but->item_context_menu_fn(C, search_but->arg, active, event)) {
+              if (search_but->item_context_menu_fn(C, search_but->arg.get(), active, event)) {
                 handled = true;
               }
             }
@@ -668,14 +444,6 @@ bool searchbox_event(
       }
       break;
     case MOUSEMOVE: {
-      /* Touch: before the hover-select below, which would otherwise fight a drag for the same
-       * motion -- the finger would scroll the list and then immediately select whatever slid
-       * under it. */
-      if (searchbox_touch_scroll(C, region, but, data, event)) {
-        handled = true;
-        break;
-      }
-
       /* Ignore the mouse event, in case the search popup is created underneath the cursor.
        * We always want the first result to be selected by default. See: #144168 */
       if (event->xy[0] == event->prev_xy[0] && event->xy[1] == event->prev_xy[1]) {
@@ -741,7 +509,7 @@ static void searchbox_update_fn(bContext *C,
     WM_tooltip_clear(C, win);
   }
   const bool is_first_search = !but->changed;
-  but->items_update_fn(C, but->arg, str, items, is_first_search);
+  but->items_update_fn(C, but->arg.get(), str, items, is_first_search);
 }
 
 void searchbox_update(bContext *C, ARegion *region, Button *but, const bool reset)
@@ -901,10 +669,6 @@ static void searchbox_draw_clip_tri_up(rcti *rect, const float zoom)
 
 static void searchbox_region_draw_fn(const bContext *C, ARegion *region)
 {
-  /* Touch: and again here, so the text and the icons in a row grow with the row. The layout above
-   * sizes the box; this sizes what goes in it, and the two have to agree. */
-  const ScopedMenuScale menu_scale(ED_ui_menu_scale());
-
   uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
 
   /* pixel space */
@@ -960,12 +724,8 @@ static void searchbox_region_draw_fn(const bContext *C, ARegion *region)
     }
     else {
       const int search_sep_len = data->sep_string ? strlen(data->sep_string) : 0;
-      /* Touch: never more rows than the box holds, whatever the gather came back with. Capping
-       * maxitem should already have seen to it; this is the line that makes drawing outside the
-       * box impossible rather than merely unlikely. */
-      const int items_drawn = std::min(data->items.totitem, data->rows);
       /* draw items */
-      for (int a = 0; a < items_drawn; a++) {
+      for (int a = 0; a < data->items.totitem; a++) {
         const int64_t but_flag = ((a == data->active) ? UI_HOVER : 0) | data->items.but_flags[a];
         const char *name = data->items.names[a];
         int icon = data->items.icons[a];
@@ -1107,20 +867,6 @@ static void searchbox_region_listen_fn(const wmRegionListenerParams *params)
 
 static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
 {
-  /* Touch: a search box is menu chrome, and it is the one piece of it that is not built inside
-   * popup_block_refresh().
-   *
-   * It is a temporary region of its own, laid out and drawn by these two callbacks with no scale
-   * applied, so #searchbox_size_y() -- which is SEARCH_ITEMS * UI_UNIT_Y -- measured the unscaled
-   * widget unit while the popup holding the search field measured the scaled one. The row count is
-   * fixed, so the whole box came out at two thirds the height its rows wanted: the same squeeze,
-   * and the same ratio, as the button context menus.
-   *
-   * Held across the whole function rather than around the size call, because the position is
-   * computed from the same units. #ScopedMenuScale is re-entrant: a caller that already applied
-   * the scale makes this a no-op rather than compounding it. */
-  const ScopedMenuScale menu_scale(ED_ui_menu_scale());
-
   uiSearchboxData *data = static_cast<uiSearchboxData *>(region->regiondata);
 
   if (data->size_set) {
@@ -1189,8 +935,8 @@ static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
     BLI_rcti_translate(&rect_i, butregion->winrct.xmin, butregion->winrct.ymin);
 
     int winx = WM_window_native_pixel_x(win);
-    /* Touch: the height is wanted now, not left unused. See the clamp below. */
-    const int winy = WM_window_native_pixel_y(win);
+    // winy = WM_window_pixels_y(win);  /* UNUSED */
+    // wm_window_get_size(win, &winx, &winy);
 
     if (rect_i.xmax > winx) {
       /* super size */
@@ -1204,66 +950,17 @@ static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
       }
     }
 
-    /* Touch: pick the side of the field with room, then take the height from that side's room.
-     *
-     * The box grows away from the field and is never moved across it. That is the whole design,
-     * and it is not a detail: a box slid vertically to fit the screen can end up over the very
-     * field that opened it, and then the press that opens it lands on the box instead -- the list
-     * appears and vanishes in the same instant, and the field cannot be used at all.
-     *
-     * What was here watched two of the four edges. The right, and the bottom through a flip that
-     * moves the box above the field when there is no room beneath it. Nothing watched the top, and
-     * the window height was not even read -- the line fetching it was commented out as unused -- so
-     * a field near the top of the Properties editor flipped upwards and ran off the ceiling. That
-     * is how an IK constraint's Target list came out with its rows above the screen.
-     *
-     * Shrink rather than clamp: cutting the rectangle would squeeze the rows back to the
-     * unreadable heights the row count exists to avoid, so the height is refitted to whole rows.
-     * #searchbox_size_y_fit floors at two rows, so a field with almost no room either side gets a
-     * short box hanging off the screen edge rather than nothing at all -- but it hangs off the
-     * edge, never over the field.
-     *
-     * The floor is the on-screen keyboard when it is up, for the same reason the F3 popup keeps
-     * clear of it: the two are used together, and results under the keys typing into them cannot
-     * be reached. Android's own keyboard cannot be accounted for -- its insets never reach this
-     * window -- so a field that opens the platform IME is still on its own. */
-    {
-      int floor_y = 0;
-      rcti keyboard;
-      if (WM_virtual_keyboard_rect_get(win, &keyboard)) {
-        floor_y = keyboard.ymax;
-      }
+    if (rect_i.ymin < 0) {
+      int newy1 = but->rect.ymax + ofsy;
 
-      /* The two anchors in window coordinates: the bottom of the field, and its top. */
-      const int anchor_below = rect_i.ymax;
-      int anchor_above = but->rect.ymax + ofsy;
       if (butregion->v2d.cur.xmin != butregion->v2d.cur.xmax) {
-        anchor_above = view2d_view_to_region_y(&butregion->v2d, anchor_above);
-      }
-      anchor_above += butregion->winrct.ymin;
-
-      const int room_below = anchor_below - floor_y;
-      const int room_above = winy - anchor_above;
-      const int wanted = BLI_rcti_size_y(&rect_i);
-
-      /* Below unless above has more to offer, which is the same preference as before -- only now
-       * it is decided by measuring both sides rather than by discovering the first one failed. */
-      if (room_below >= wanted || room_below >= room_above) {
-        rect_i.ymax = anchor_below;
-        rect_i.ymin = anchor_below - searchbox_size_y_fit(std::min(wanted, room_below));
-      }
-      else {
-        rect_i.ymin = anchor_above;
-        rect_i.ymax = anchor_above + searchbox_size_y_fit(std::min(wanted, room_above));
+        newy1 = view2d_view_to_region_y(&butregion->v2d, newy1);
       }
 
-      /* Sideways only. Moving it vertically is exactly what would put it over the field. */
-      if (rect_i.xmax > winx) {
-        BLI_rcti_translate(&rect_i, winx - rect_i.xmax, 0);
-      }
-      if (rect_i.xmin < 0) {
-        BLI_rcti_translate(&rect_i, -rect_i.xmin, 0);
-      }
+      newy1 += butregion->winrct.ymin;
+
+      rect_i.ymax = BLI_rcti_size_y(&rect_i) + newy1;
+      rect_i.ymin = newy1;
     }
 
     /* widget rect, in region coords */
@@ -1282,40 +979,6 @@ static void searchbox_region_layout_fn(const bContext *C, ARegion *region)
   region->winx = region->winrct.xmax - region->winrct.xmin + 1;
   region->winy = region->winrct.ymax - region->winrct.ymin + 1;
 
-  /* Touch: the box has been measured, so now say how many rows it really holds -- and if the
-   * gather already ran against the old count, run it again against this one.
-   *
-   * The order is creation, first gather, layout, draw. A count settled here alone therefore
-   * arrives one step too late: the gather had already filled ten items into a box with room for
-   * six, and the four extra drew below it, which is why the overflow healed itself the moment
-   * anything scrolled and forced a second gather. Estimating the box at creation instead was
-   * tried and came out short by a row or two, because the height the popup asks for and the box
-   * this region ends up with are separated by a chain of margins that do not cancel.
-   *
-   * So it is measured here, where the answer is certain, and the gather is simply redone. The
-   * cost is one extra pass over the results as the box opens. */
-  if (!data->preview) {
-    const int rows = searchbox_rows_for_height(BLI_rcti_size_y(&data->bbox));
-    if (rows != data->items.maxitem) {
-      data->rows = rows;
-      data->items.maxitem = rows;
-      searchbox_update(const_cast<bContext *>(C), region, data->search_but, false);
-    }
-  }
-
-  /* Touch: settle the row geometry here, where the menu scale is held, so everything that asks
-   * later -- the draw, and the hit test on a release, which runs without it -- gets the same
-   * answer. Rows at their natural height and top aligned rather than the box stretched to fill:
-   * the popup paints its background from the block's own height while this bbox comes from the
-   * region around it, and dividing the box by the count spread that difference into the rows
-   * until the last one hung below the background behind it. Slack stays empty at the bottom,
-   * where nothing draws. */
-  data->tria_h = int(data->zoom * UI_SEARCHBOX_TRIA_H);
-  if (!data->preview) {
-    const int usable = BLI_rcti_size_y(&data->bbox) - 2 * data->tria_h;
-    data->row_h = std::min(int(UI_UNIT_Y), usable / std::max(data->rows, 1));
-  }
-
   data->size_set = true;
 }
 
@@ -1324,12 +987,6 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
                                             ButtonSearch *but,
                                             const bool use_shortcut_sep)
 {
-  /* Touch: the same scale the layout and the draw hold, for the same reason and one step earlier.
-   * The row count is settled in here, and it is measured in widget units -- so if this ran at the
-   * unscaled unit while the layout ran at the scaled one, the two would disagree about how many
-   * rows the very same box holds. */
-  const ScopedMenuScale menu_scale(ED_ui_menu_scale());
-
   const uiStyle *style = style_get();
   const float aspect = but->block->aspect;
 
@@ -1347,7 +1004,7 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
 
   /* Create search-box data. */
   uiSearchboxData *data = MEM_new<uiSearchboxData>(__func__);
-  data->search_arg = but->arg;
+  data->search_arg = but->arg.get();
   data->search_but = but;
   data->butregion = butregion;
   data->size_set = false;
@@ -1385,17 +1042,6 @@ static ARegion *searchbox_create_generic_ex(bContext *C,
   ED_region_tag_redraw(region);
 
   /* prepare search data */
-  data->drag_last_y = INT_MIN;
-  data->drag_accum = 0;
-  data->drag_travel = 0;
-  data->drag_active = false;
-  data->drag_armed = false;
-  /* The full count, and the buffers below are allocated for it. The layout measures the box and
-   * lowers both once it knows what actually fits. */
-  data->rows = SEARCH_ITEMS;
-  /* Sane geometry until the layout settles it for real; this runs inside the menu scale too. */
-  data->tria_h = int(data->zoom * UI_SEARCHBOX_TRIA_H);
-  data->row_h = int(UI_UNIT_Y);
   if (data->preview) {
     data->items.maxitem = data->prv_rows * data->prv_cols;
   }

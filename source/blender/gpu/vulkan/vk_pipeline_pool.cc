@@ -17,12 +17,9 @@
 
 #include "CLG_log.h"
 
-#include "GPU_capabilities.hh"
 #include "vk_backend.hh"
 #include "vk_graphics_pipeline.hh"
-#include "vk_pipeline_diag.hh"
 #include "vk_pipeline_pool.hh"
-#include "vk_to_string.hh"
 
 namespace blender {
 
@@ -50,99 +47,6 @@ void VKPipelinePool::init()
 /** \name Compute pipelines
  * \{ */
 
-/**
- * `void main() {}` with a 1x1x1 local size, as SPIR-V.
- *
- * Generated offline so no shader compiler is needed on this path:
- *   glslangValidator -V noop.comp -o noop.spv
- * A compute shader is free to leave every binding in the pipeline layout unused, so this module
- * can be paired with any layout.
- */
-static const uint32_t VK_NOOP_COMPUTE_SPIRV[] = {
-    0x07230203, 0x00010000, 0x0008000b, 0x0000000a, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
-    0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
-    0x0005000f, 0x00000005, 0x00000004, 0x6e69616d, 0x00000000, 0x00060010, 0x00000004, 0x00000011,
-    0x00000001, 0x00000001, 0x00000001, 0x00030003, 0x00000002, 0x000001c2, 0x00040005, 0x00000004,
-    0x6e69616d, 0x00000000, 0x00040047, 0x00000009, 0x0000000b, 0x00000019, 0x00020013, 0x00000002,
-    0x00030021, 0x00000003, 0x00000002, 0x00040015, 0x00000006, 0x00000020, 0x00000000, 0x00040017,
-    0x00000007, 0x00000006, 0x00000003, 0x0004002b, 0x00000006, 0x00000008, 0x00000001, 0x0006002c,
-    0x00000007, 0x00000009, 0x00000008, 0x00000008, 0x00000008, 0x00050036, 0x00000002, 0x00000004,
-    0x00000000, 0x00000003, 0x000200f8, 0x00000005, 0x000100fd, 0x00010038,
-};
-
-/**
- * Build a pipeline that runs the do-nothing shader above, using the layout the real shader would
- * have had.
- *
- * `vkCreateComputePipelines` can refuse a shader that every desktop driver accepts and that
- * `spirv-val` considers valid — Qualcomm's Adreno driver answers VK_ERROR_UNKNOWN for several of
- * EEVEE's and the subdivision evaluator's compute shaders, and its own log says only "Shader
- * compilation failed". Returning a null handle from here is worse than it sounds: callers hold a
- * shader they believe is ready, `vkCmdBindPipeline` rejects VK_NULL_HANDLE as invalid usage, and
- * dropping the dispatch instead leaves the render graph without the resource transitions the
- * following nodes wait for. Either way the frame never finishes, and on Android a frame that never
- * finishes is an ANR that kills the process.
- *
- * A valid pipeline that writes nothing keeps all of that intact. The pass produces no output — the
- * viewport loses that effect — but the frame completes and the application stays alive.
- */
-static VkPipeline vk_compute_pipeline_noop(VKDevice &device,
-                                           VkPipelineLayout vk_pipeline_layout,
-                                           StringRefNull name)
-{
-  VkShaderModuleCreateInfo module_info = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                                          nullptr,
-                                          0,
-                                          sizeof(VK_NOOP_COMPUTE_SPIRV),
-                                          VK_NOOP_COMPUTE_SPIRV};
-  VkShaderModule vk_module = VK_NULL_HANDLE;
-  if (device.functions.vkCreateShaderModule(
-          device.vk_handle(), &module_info, nullptr, &vk_module) != VK_SUCCESS)
-  {
-    return VK_NULL_HANDLE;
-  }
-
-  VkComputePipelineCreateInfo pipeline_info = {
-      VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      nullptr,
-      0,
-      {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-       nullptr,
-       0,
-       VK_SHADER_STAGE_COMPUTE_BIT,
-       vk_module,
-       "main",
-       nullptr},
-      vk_pipeline_layout,
-      VK_NULL_HANDLE,
-      0};
-  VkPipeline vk_pipeline = VK_NULL_HANDLE;
-  const VkResult result = device.functions.vkCreateComputePipelines(
-      device.vk_handle(), VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &vk_pipeline);
-
-  /* The module is only needed while the pipeline is built. */
-  device.functions.vkDestroyShaderModule(device.vk_handle(), vk_module, nullptr);
-
-  if (result != VK_SUCCESS) {
-    CLOG_ERROR(&LOG,
-               "Could not even build a do-nothing pipeline for `%s`: %s",
-               name.c_str(),
-               to_string(result));
-    return VK_NULL_HANDLE;
-  }
-  CLOG_WARN(&LOG,
-            "Substituted a do-nothing pipeline for `%s`. This pass will produce no output.",
-            name.c_str());
-
-  /* Subdivision is the one consumer that has a working alternative: the surface can be
-   * evaluated on the CPU. A do-nothing pipeline would leave its buffers empty and the mesh
-   * would be drawn as collapsed geometry, so tell the subdivision code to stop asking the GPU. */
-  if (name.startswith("subdiv_")) {
-    GPU_subdivision_evaluation_set_broken();
-  }
-  return vk_pipeline;
-}
-
 VkPipeline VKPipelinePool::get_or_create_compute_pipeline(const VKComputeInfo &compute_info,
                                                           const bool is_static_shader,
                                                           VkPipeline vk_pipeline_base,
@@ -151,7 +55,12 @@ VkPipeline VKPipelinePool::get_or_create_compute_pipeline(const VKComputeInfo &c
   bool created = false;
   VkPipelineCache vk_pipeline_cache = is_static_shader ? vk_pipeline_cache_static_ :
                                                          vk_pipeline_cache_non_static_;
-  return compute_.get_or_create(compute_info, vk_pipeline_cache, vk_pipeline_base, name, created);
+  VkPipeline pipeline = compute_.get_or_create(
+      compute_info, vk_pipeline_cache, vk_pipeline_base, name, created);
+  if (created) {
+    compilation_counter_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return pipeline;
 }
 
 template<>
@@ -199,83 +108,18 @@ VkPipeline VKPipelineMap<VKComputeInfo>::create(const VKComputeInfo &compute_inf
 
   double start_time = BLI_time_now_seconds();
   VkPipeline pipeline = VK_NULL_HANDLE;
-  const VkResult result = device.functions.vkCreateComputePipelines(device.vk_handle(),
-                                                                    vk_pipeline_cache,
-                                                                    1,
-                                                                    &vk_compute_pipeline_create_info,
-                                                                    nullptr,
-                                                                    &pipeline);
-  if (result != VK_SUCCESS) {
-    CLOG_ERROR(&LOG,
-               "Failed to compile compute pipeline `%s`: %s (specialization constants: %d, "
-               "base pipeline: %s, cache: %s)",
-               name.c_str(),
-               to_string(result),
-               int(compute_info.specialization_constants.size()),
-               vk_pipeline_base == VK_NULL_HANDLE ? "no" : "yes",
-               vk_pipeline_cache == VK_NULL_HANDLE ? "no" : "yes");
-
-    {
-      const VkPhysicalDeviceLimits &limits = device.physical_device_properties_get().limits;
-      vk_pipeline_diag_logf(
-          "COMPUTE FAIL %s | result=%s | spec=%zu | base=%s | cache=%s | "
-          "maxWGI=%u | maxWGS=(%u,%u,%u) | layout=0x%zX",
-          name.c_str(),
-          to_string(result),
-          compute_info.specialization_constants.size(),
-          vk_pipeline_base == VK_NULL_HANDLE ? "no" : "yes",
-          vk_pipeline_cache == VK_NULL_HANDLE ? "no" : "yes",
-          limits.maxComputeWorkGroupInvocations,
-          limits.maxComputeWorkGroupSize[0],
-          limits.maxComputeWorkGroupSize[1],
-          limits.maxComputeWorkGroupSize[2],
-          size_t(compute_info.vk_pipeline_layout));
-    }
-
-    /* Qualcomm's Adreno driver answers VK_ERROR_UNKNOWN for compute pipelines that every desktop
-     * driver accepts, and the message carries no reason. Narrow it down by retrying with one
-     * input removed at a time: the shared pipeline cache first (the shader compile workers use it
-     * concurrently), then the base pipeline handle. Whichever retry succeeds is both the diagnosis
-     * and a usable pipeline, so keep it instead of returning a null handle that would leave the
-     * caller to fail again further away from the cause. */
-    if (vk_pipeline_cache != VK_NULL_HANDLE) {
-      const VkResult retry = device.functions.vkCreateComputePipelines(
-          device.vk_handle(), VK_NULL_HANDLE, 1, &vk_compute_pipeline_create_info, nullptr,
-          &pipeline);
-      CLOG_ERROR(&LOG, "  retry `%s` without pipeline cache: %s", name.c_str(), to_string(retry));
-      vk_pipeline_diag_logf("COMPUTE RETRY-no-cache %s | result=%s",
-                            name.c_str(),
-                            to_string(retry));
-      if (retry == VK_SUCCESS) {
-        return pipeline;
-      }
-    }
-    if (vk_pipeline_base != VK_NULL_HANDLE) {
-      vk_compute_pipeline_create_info.basePipelineHandle = VK_NULL_HANDLE;
-      const VkResult retry = device.functions.vkCreateComputePipelines(
-          device.vk_handle(), VK_NULL_HANDLE, 1, &vk_compute_pipeline_create_info, nullptr,
-          &pipeline);
-      CLOG_ERROR(&LOG, "  retry `%s` without base pipeline: %s", name.c_str(), to_string(retry));
-      vk_pipeline_diag_logf("COMPUTE RETRY-no-base %s | result=%s",
-                            name.c_str(),
-                            to_string(retry));
-      if (retry == VK_SUCCESS) {
-        return pipeline;
-      }
-    }
-    vk_pipeline_diag_logf("COMPUTE NOOP-FALLBACK %s", name.c_str());
-    return vk_compute_pipeline_noop(device, compute_info.vk_pipeline_layout, name);
-  }
+  device.functions.vkCreateComputePipelines(device.vk_handle(),
+                                            vk_pipeline_cache,
+                                            1,
+                                            &vk_compute_pipeline_create_info,
+                                            nullptr,
+                                            &pipeline);
   double end_time = BLI_time_now_seconds();
   debug::object_label(pipeline, name);
   CLOG_DEBUG(&LOG,
              "Compiled compute pipeline %s in %fms ",
              name.c_str(),
              (end_time - start_time) * 1000.0);
-  vk_pipeline_diag_logf("COMPUTE OK %s | time_ms=%.1f | spec=%zu",
-                        name.c_str(),
-                        (end_time - start_time) * 1000.0,
-                        compute_info.specialization_constants.size());
 
   return pipeline;
 }
@@ -298,8 +142,12 @@ VkPipeline VKPipelinePool::get_or_create_graphics_pipeline(const VKGraphicsInfo 
       "otherwise an incorrect fragment output library will be linked.");
   VkPipelineCache vk_pipeline_cache = is_static_shader ? vk_pipeline_cache_static_ :
                                                          vk_pipeline_cache_non_static_;
-  return graphics_.get_or_create(
+  VkPipeline pipeline = graphics_.get_or_create(
       graphics_info, vk_pipeline_cache, vk_pipeline_base, name, r_created);
+  if (r_created) {
+    compilation_counter_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return pipeline;
 }
 
 static VkPipeline create_graphics_pipeline_no_libs(const VKGraphicsInfo &graphics_info,
@@ -314,25 +162,13 @@ static VkPipeline create_graphics_pipeline_no_libs(const VKGraphicsInfo &graphic
   /* Build pipeline. */
   VkPipeline pipeline = VK_NULL_HANDLE;
   double start_time = BLI_time_now_seconds();
-  const VkResult result = device.functions.vkCreateGraphicsPipelines(
-      device.vk_handle(),
-      vk_pipeline_cache,
-      1,
-      &builder.vk_graphics_pipeline_create_info,
-      nullptr,
-      &pipeline);
-  if (result != VK_SUCCESS) {
-    CLOG_ERROR(&LOG,
-               "Failed to compile graphics pipeline `%s`: %s",
-               name.c_str(),
-               to_string(result));
-    vk_pipeline_diag_logf("GRAPHICS FAIL %s | result=%s", name.c_str(), to_string(result));
-  }
+  device.functions.vkCreateGraphicsPipelines(device.vk_handle(),
+                                             vk_pipeline_cache,
+                                             1,
+                                             &builder.vk_graphics_pipeline_create_info,
+                                             nullptr,
+                                             &pipeline);
   double end_time = BLI_time_now_seconds();
-  if (result == VK_SUCCESS) {
-    vk_pipeline_diag_logf(
-        "GRAPHICS OK %s | time_ms=%.1f", name.c_str(), (end_time - start_time) * 1000.0);
-  }
   debug::object_label(pipeline, name);
   CLOG_DEBUG(&LOG,
              "Compiled graphics pipeline %s in %fms ",
@@ -715,8 +551,9 @@ VkPipeline VKPipelineMap<VKGraphicsInfo::Shaders>::create(
 {
   VKDevice &device = VKBackend::get().device;
   const VKExtensions &extensions = device.extensions_get();
+  const VKWorkarounds &workarounds = device.workarounds_get();
   VKGraphicsPipelineCreateInfoBuilder builder;
-  builder.build_shaders_lib(shaders_info, extensions, vk_pipeline_base);
+  builder.build_shaders_lib(shaders_info, extensions, workarounds, vk_pipeline_base);
 
   /* Build pipeline. */
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -755,9 +592,8 @@ VkPipeline VKPipelineMap<VKGraphicsInfo::FragmentOut>::create(
     StringRefNull name)
 {
   VKDevice &device = VKBackend::get().device;
-  const VKExtensions &extensions = device.extensions_get();
   VKGraphicsPipelineCreateInfoBuilder builder;
-  builder.build_fragment_output_lib(fragment_output_info, extensions, vk_pipeline_base);
+  builder.build_fragment_output_lib(fragment_output_info, vk_pipeline_base);
 
   /* Build pipeline. */
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -782,6 +618,17 @@ void VKPipelinePool::discard(VKDiscardPool &discard_pool, VkPipelineLayout vk_pi
   compute_.discard(discard_pool, vk_pipeline_layout);
   shaders_libs_.discard(discard_pool, vk_pipeline_layout);
   /* vertex_input_libs_ and fragment_output_libs_ are NOT dependent on vk_pipeline_layout. */
+}
+
+bool VKPipelinePool::compiled_since_last_reset() const
+{
+  /* The counter increases monotonically, so checking inequality means compilation happened. */
+  return compilation_counter_.load(std::memory_order_relaxed) != compilation_counter_at_reset_;
+}
+
+void VKPipelinePool::reset_compilation_tracking()
+{
+  compilation_counter_at_reset_ = compilation_counter_.load(std::memory_order_relaxed);
 }
 
 void VKPipelinePool::free_data(const VKDevice &device)

@@ -226,7 +226,8 @@ static Vector<MeshToBMeshLayerInfo> mesh_to_bm_copy_info_calc(const Mesh &mesh,
     MeshToBMeshLayerInfo info{};
     info.type = type;
     info.bmesh_offset = bm_layer.offset;
-    if (const bke::Attribute *attr = storage.lookup(layer_name)) {
+    const bke::Attribute *attr = storage.lookup(layer_name);
+    if (attr && attr->domain() == domain) {
       switch (attr->storage_type()) {
         case bke::AttrStorageType::Array: {
           const auto &array_data = std::get<bke::Attribute::ArrayData>(attr->data());
@@ -304,6 +305,12 @@ static CustomData get_mesh_to_bm_custom_data(const Mesh &mesh,
     }
     CustomData_add_layer_named(
         &custom_data, eCustomDataType(layer.type), CD_SET_DEFAULT, 0, layer.name);
+    if (layer.type == CD_MDISPS && layer.flag & CD_FLAG_EXTERNAL) {
+      const int new_layer_i = CustomData_get_layer_index(&custom_data, layer.type);
+      BLI_assert(new_layer_i != -1);
+      CustomDataLayer &new_layer = custom_data.layers[new_layer_i];
+      new_layer.flag = layer.flag;
+    }
   }
   return custom_data;
 }
@@ -326,6 +333,11 @@ void BM_mesh_bm_from_me(BMesh *bm, const Mesh *mesh, const BMeshFromMeshParams *
   CustomData mesh_pdata = get_mesh_to_bm_custom_data(*mesh, bke::AttrDomain::Face, mask.pmask);
   CustomData mesh_ldata = get_mesh_to_bm_custom_data(*mesh, bke::AttrDomain::Corner, mask.lmask);
 
+  const CustomData &mesh_data = get_mesh_custom_data(*mesh, AttrDomain::Corner);
+  if (mesh_data.external) {
+    mesh_ldata.external = MEM_dupalloc(mesh_data.external);
+  }
+
   Vector<std::string> temporary_layers_to_delete;
 
   for (const int layer_index :
@@ -347,6 +359,8 @@ void BM_mesh_bm_from_me(BMesh *bm, const Mesh *mesh, const BMeshFromMeshParams *
     for (const std::string &name : temporary_layers_to_delete) {
       CustomData_free_layer_named(&mesh_ldata, name);
     }
+
+    MEM_SAFE_DELETE(mesh_ldata.external);
 
     MEM_SAFE_DELETE(mesh_vdata.layers);
     MEM_SAFE_DELETE(mesh_edata.layers);
@@ -475,9 +489,7 @@ void BM_mesh_bm_from_me(BMesh *bm, const Mesh *mesh, const BMeshFromMeshParams *
 
     int i;
     KeyBlock *block;
-    for (i = 0, block = static_cast<KeyBlock *>(mesh->key->block.first); i < tot_shape_keys;
-         block = block->next, i++)
-    {
+    for (i = 0, block = mesh->key->block.first(); i < tot_shape_keys; block = block->next, i++) {
       if (is_new) {
         CustomData_add_layer_named(&bm->vdata, CD_SHAPEKEY, CD_SET_DEFAULT, 0, block->name);
         int j = CustomData_get_layer_index_n(&bm->vdata, CD_SHAPEKEY, i);
@@ -892,7 +904,7 @@ static void bm_to_mesh_shape(BMesh *bm,
     }
 
     KeyBlock *currkey;
-    for (currkey = static_cast<KeyBlock *>(key->block.first); currkey; currkey = currkey->next) {
+    for (currkey = key->block.first(); currkey; currkey = currkey->next) {
       if (currkey->uid == bm->vdata.layers[i].uid) {
         break;
       }
@@ -1606,6 +1618,12 @@ static void add_bm_cd_to_mesh(const BMesh &bm,
         continue;
       }
       CustomData_add_layer_named(&mesh_data, cd_type, CD_CONSTRUCT, domain_size, layer.name);
+      if (layer.type == CD_MDISPS && layer.flag & CD_FLAG_EXTERNAL) {
+        const int new_layer_i = CustomData_get_layer_index(&mesh_data, layer.type);
+        BLI_assert(new_layer_i != -1);
+        CustomDataLayer &new_layer = mesh_data.layers[new_layer_i];
+        new_layer.flag = layer.flag;
+      }
     }
   }
 }
@@ -1653,10 +1671,8 @@ void BM_mesh_bm_to_me(Main *bmain, BMesh *bm, Mesh *mesh, const BMeshToMeshParam
   AttributeOwner owner = AttributeOwner::from_id(&mesh->id);
   const std::string attributes_active_name = BKE_attributes_active_name_get(owner).value_or("");
 
-  /* Override (wrong) DNA default of 0 for attributes_active_index. See comments on the
-   * Mesh.attributes_active_index declaration. */
   if (attributes_active_name.empty()) {
-    BLI_assert(ELEM(mesh->attributes_active_index, 0, -1));
+    BLI_assert(mesh->attributes_active_index == -1);
     mesh->attributes_active_index = -1;
   }
 
@@ -1721,6 +1737,13 @@ void BM_mesh_bm_to_me(Main *bmain, BMesh *bm, Mesh *mesh, const BMeshToMeshParam
   {
     CustomData_MeshMasks mask = CD_MASK_MESH;
     CustomData_MeshMasks_update(&mask, &params->cd_mask_extra);
+
+    const CustomData &bm_data = get_bm_custom_data(*bm, AttrDomain::Corner);
+    CustomData &mesh_data = get_mesh_custom_data(*mesh, AttrDomain::Corner);
+    if (bm_data.external) {
+      mesh_data.external = MEM_dupalloc(bm_data.external);
+    }
+
     add_bm_cd_to_mesh(*bm, bke::AttrDomain::Point, mask.vmask, *mesh);
     add_bm_cd_to_mesh(*bm, bke::AttrDomain::Edge, mask.emask, *mesh);
     add_bm_cd_to_mesh(*bm, bke::AttrDomain::Face, mask.pmask, *mesh);
@@ -1936,36 +1959,25 @@ void BM_mesh_bm_to_me(Main *bmain, BMesh *bm, Mesh *mesh, const BMeshToMeshParam
   /* Conversion to edit-mesh may have modified the attribute layers.
    * Re-resolve the active attribute by name to keep it stable. */
   if (!attributes_active_name.empty()) {
-    /* Invalid active attributes can happen because of wrong DNA default, see comment
-     * on the Mesh.attributes_active_index declaration. */
-    if (bke::allow_procedural_attribute_access(attributes_active_name)) {
-      BKE_attributes_active_set(owner, attributes_active_name);
-    }
-    else {
-      mesh->attributes_active_index = -1;
-    }
+    BLI_assert(bke::allow_procedural_attribute_access(attributes_active_name));
+    BKE_attributes_active_set(owner, attributes_active_name);
   }
   else {
-    BLI_assert(ELEM(mesh->attributes_active_index, 0, -1));
+    BLI_assert(mesh->attributes_active_index == -1);
     mesh->attributes_active_index = -1;
   }
 }
 
-void BM_mesh_bm_to_me_compact(BMesh &bm,
-                              Mesh &mesh,
-                              const CustomData_MeshMasks *mask,
-                              const bool add_mesh_attributes)
+static void mesh_bm_to_me_compact(BMesh &bm,
+                                  Mesh &mesh,
+                                  const CustomData_MeshMasks *mask,
+                                  const bool only_select_and_hide)
 {
   /* NOTE: The function is called from multiple threads with the same input BMesh and different
    * mesh objects. */
 
   /* Must be an empty mesh. */
   BLI_assert(mesh.verts_num == 0);
-
-  /* New Mesh is created with this at 0, but if the conversion from BMesh potentially adds
-   * some attributes we should make sure it is at -1 or it might point to an invalid internal
-   * attribute. */
-  mesh.attributes_active_index = -1;
 
   /* Just in case, clear the derived geometry caches from the input mesh. */
   BKE_mesh_runtime_clear_geometry(&mesh);
@@ -1977,7 +1989,8 @@ void BM_mesh_bm_to_me_compact(BMesh &bm,
   mesh.faces_num = bm.totface;
 
   /* Will have been cleared when clearing geometry. */
-  const bool need_uv_select = CustomData_has_layer(&bm.ldata, CD_PROP_FLOAT2);
+  const bool need_uv_select = !only_select_and_hide &&
+                              CustomData_has_layer(&bm.ldata, CD_PROP_FLOAT2);
   if (need_uv_select && bm.uv_select_sync_valid) {
     mesh.flag |= ME_FLAG_UV_SELECT_SYNC_VALID;
   }
@@ -2033,22 +2046,35 @@ void BM_mesh_bm_to_me_compact(BMesh &bm,
       });
   bm.elem_index_dirty &= ~(BM_VERT | BM_EDGE | BM_FACE | BM_LOOP);
 
-  if (add_mesh_attributes) {
+  if (only_select_and_hide) {
+    need_material_index = false;
+    need_sharp_edge = false;
+    need_sharp_face = false;
+    need_uv_seams = false;
+  }
+  else {
     const CustomData_MeshMasks &mask_final = mask ? *mask : CD_MASK_DERIVEDMESH;
+
+    const CustomData &bm_data = get_bm_custom_data(bm, AttrDomain::Corner);
+    CustomData &mesh_data = get_mesh_custom_data(mesh, AttrDomain::Corner);
+    if (bm_data.external) {
+      mesh_data.external = MEM_dupalloc(bm_data.external);
+    }
+
     add_bm_cd_to_mesh(bm, bke::AttrDomain::Point, mask_final.vmask, mesh);
     add_bm_cd_to_mesh(bm, bke::AttrDomain::Edge, mask_final.emask, mesh);
     add_bm_cd_to_mesh(bm, bke::AttrDomain::Face, mask_final.pmask, mesh);
     add_bm_cd_to_mesh(bm, bke::AttrDomain::Corner, mask_final.lmask, mesh);
-  }
 
-  if (const char *name = CustomData_get_active_layer_name(&bm.ldata, CD_PROP_FLOAT2)) {
-    MEM_SAFE_DELETE(mesh.active_uv_map_attribute);
-    mesh.active_uv_map_attribute = BLI_strdup(name);
-  }
+    if (const char *name = CustomData_get_active_layer_name(&bm.ldata, CD_PROP_FLOAT2)) {
+      MEM_SAFE_DELETE(mesh.active_uv_map_attribute);
+      mesh.active_uv_map_attribute = BLI_strdup(name);
+    }
 
-  if (const char *name = CustomData_get_render_layer_name(&bm.ldata, CD_PROP_FLOAT2)) {
-    MEM_SAFE_DELETE(mesh.default_uv_map_attribute);
-    mesh.default_uv_map_attribute = BLI_strdup(name);
+    if (const char *name = CustomData_get_render_layer_name(&bm.ldata, CD_PROP_FLOAT2)) {
+      MEM_SAFE_DELETE(mesh.default_uv_map_attribute);
+      mesh.default_uv_map_attribute = BLI_strdup(name);
+    }
   }
 
   /* Add optional mesh attributes before parallel iteration. */
@@ -2068,49 +2094,44 @@ void BM_mesh_bm_to_me_compact(BMesh &bm,
   bke::SpanAttributeWriter<int> material_index;
 
   bke::MutableAttributeAccessor attrs = mesh.attributes_for_write();
-  if (add_mesh_attributes) {
-    if (need_select_vert) {
-      select_vert = attrs.lookup_or_add_for_write_only_span<bool>(".select_vert",
-                                                                  AttrDomain::Point);
-    }
-    if (need_hide_vert) {
-      hide_vert = attrs.lookup_or_add_for_write_only_span<bool>(".hide_vert", AttrDomain::Point);
-    }
-    if (need_select_edge) {
-      select_edge = attrs.lookup_or_add_for_write_only_span<bool>(".select_edge",
-                                                                  AttrDomain::Edge);
-    }
-    if (need_sharp_edge) {
-      sharp_edge = attrs.lookup_or_add_for_write_only_span<bool>("sharp_edge", AttrDomain::Edge);
-    }
-    if (need_uv_seams) {
-      uv_seams = attrs.lookup_or_add_for_write_only_span<bool>("uv_seam", AttrDomain::Edge);
-    }
-    if (need_hide_edge) {
-      hide_edge = attrs.lookup_or_add_for_write_only_span<bool>(".hide_edge", AttrDomain::Edge);
-    }
-    if (need_select_poly) {
-      select_poly = attrs.lookup_or_add_for_write_only_span<bool>(".select_poly",
+  if (need_select_vert) {
+    select_vert = attrs.lookup_or_add_for_write_only_span<bool>(".select_vert", AttrDomain::Point);
+  }
+  if (need_hide_vert) {
+    hide_vert = attrs.lookup_or_add_for_write_only_span<bool>(".hide_vert", AttrDomain::Point);
+  }
+  if (need_select_edge) {
+    select_edge = attrs.lookup_or_add_for_write_only_span<bool>(".select_edge", AttrDomain::Edge);
+  }
+  if (need_sharp_edge) {
+    sharp_edge = attrs.lookup_or_add_for_write_only_span<bool>("sharp_edge", AttrDomain::Edge);
+  }
+  if (need_uv_seams) {
+    uv_seams = attrs.lookup_or_add_for_write_only_span<bool>("uv_seam", AttrDomain::Edge);
+  }
+  if (need_hide_edge) {
+    hide_edge = attrs.lookup_or_add_for_write_only_span<bool>(".hide_edge", AttrDomain::Edge);
+  }
+  if (need_select_poly) {
+    select_poly = attrs.lookup_or_add_for_write_only_span<bool>(".select_poly", AttrDomain::Face);
+  }
+  if (need_hide_poly) {
+    hide_poly = attrs.lookup_or_add_for_write_only_span<bool>(".hide_poly", AttrDomain::Face);
+  }
+  if (need_sharp_face) {
+    sharp_face = attrs.lookup_or_add_for_write_only_span<bool>("sharp_face", AttrDomain::Face);
+  }
+  if (need_uv_select) {
+    uv_select_vert = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_vert",
+                                                                   AttrDomain::Corner);
+    uv_select_edge = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_edge",
+                                                                   AttrDomain::Corner);
+    uv_select_face = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_face",
+                                                                   AttrDomain::Face);
+  }
+  if (need_material_index) {
+    material_index = attrs.lookup_or_add_for_write_only_span<int>("material_index",
                                                                   AttrDomain::Face);
-    }
-    if (need_hide_poly) {
-      hide_poly = attrs.lookup_or_add_for_write_only_span<bool>(".hide_poly", AttrDomain::Face);
-    }
-    if (need_sharp_face) {
-      sharp_face = attrs.lookup_or_add_for_write_only_span<bool>("sharp_face", AttrDomain::Face);
-    }
-    if (need_uv_select) {
-      uv_select_vert = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_vert",
-                                                                     AttrDomain::Corner);
-      uv_select_edge = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_edge",
-                                                                     AttrDomain::Corner);
-      uv_select_face = attrs.lookup_or_add_for_write_only_span<bool>(".uv_select_face",
-                                                                     AttrDomain::Face);
-    }
-    if (need_material_index) {
-      material_index = attrs.lookup_or_add_for_write_only_span<int>("material_index",
-                                                                    AttrDomain::Face);
-    }
   }
 
   attrs.add<float3>("position", bke::AttrDomain::Point, bke::AttributeInitConstruct());
@@ -2182,26 +2203,24 @@ void BM_mesh_bm_to_me_compact(BMesh &bm,
         }
       });
 
-  if (add_mesh_attributes) {
-    select_vert.finish();
-    hide_vert.finish();
-    select_edge.finish();
-    hide_edge.finish();
-    sharp_edge.finish();
-    uv_seams.finish();
-    select_poly.finish();
-    hide_poly.finish();
-    sharp_face.finish();
-    uv_select_vert.finish();
-    uv_select_edge.finish();
-    uv_select_face.finish();
-    material_index.finish();
+  select_vert.finish();
+  hide_vert.finish();
+  select_edge.finish();
+  hide_edge.finish();
+  sharp_edge.finish();
+  uv_seams.finish();
+  select_poly.finish();
+  hide_poly.finish();
+  sharp_face.finish();
+  uv_select_vert.finish();
+  uv_select_edge.finish();
+  uv_select_face.finish();
+  material_index.finish();
 
-    vert_single_checker.optimize_storage();
-    edge_single_checker.optimize_storage();
-    face_single_checker.optimize_storage();
-    corner_single_checker.optimize_storage();
-  }
+  vert_single_checker.optimize_storage();
+  edge_single_checker.optimize_storage();
+  face_single_checker.optimize_storage();
+  corner_single_checker.optimize_storage();
 }
 
 void BM_mesh_bm_to_me_for_eval(BMesh &bm, Mesh &mesh, const CustomData_MeshMasks *cd_mask_extra)
@@ -2214,7 +2233,12 @@ void BM_mesh_bm_to_me_for_eval(BMesh &bm, Mesh &mesh, const CustomData_MeshMasks
   }
   mask.vmask &= ~CD_MASK_SHAPEKEY;
 
-  BM_mesh_bm_to_me_compact(bm, mesh, &mask, true);
+  mesh_bm_to_me_compact(bm, mesh, &mask, false);
+}
+
+void BM_mesh_bm_to_me_only_select_and_hide(BMesh &bm, Mesh &mesh)
+{
+  mesh_bm_to_me_compact(bm, mesh, nullptr, true);
 }
 
 }  // namespace blender

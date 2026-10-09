@@ -39,31 +39,6 @@ static SpaceLink *statusbar_create(const ScrArea * /*area*/, const Scene * /*sce
   sstatusbar = MEM_new<SpaceStatusBar>("init statusbar");
   sstatusbar->spacetype = SPACE_STATUSBAR;
 
-  /* Touch: two header regions, so the far left of the status bar can hold something that does not
-   * move.
-   *
-   * The bar overflows on a phone -- the input hints and the memory figures together are wider than
-   * the screen -- and this fork lets a finger drag a header sideways to read the rest. One region
-   * means everything travels together, including the on-screen keyboard button at the far left,
-   * which is the one control that has to stay reachable: scrolling far enough to read the VRAM
-   * figure pushed it off the edge.
-   *
-   * The button region comes **first** and the figures come last, and that order is not cosmetic.
-   * region_rect_recursive() forces the last region in the list to RGN_ALIGN_NONE -- the "user
-   * errors" line in area.cc -- so whichever region is last cannot be the aligned one. Built the
-   * other way round, with the button last and RGN_SPLIT_PREV on it, the button region was handed
-   * the whole of its neighbour rect and the figures came out zero wide and invisible.
-   *
-   * The button region is the aligned one for a second reason: it is flagged
-   * #RGN_FLAG_DYNAMIC_SIZE in statusbar_header_region_init() and so takes the width its own
-   * content asks for. The button is one button wide and never changes. The figures cannot be that
-   * region -- with the hints and the memory and the VRAM in them they ask for more than the bar
-   * has, and squeeze the other side away to nothing. */
-  region = BKE_area_region_new();
-  BLI_addtail(&sstatusbar->regionbase, region);
-  region->regiontype = RGN_TYPE_HEADER;
-  region->alignment = RGN_ALIGN_LEFT;
-
   /* header region */
   region = BKE_area_region_new();
   BLI_addtail(&sstatusbar->regionbase, region);
@@ -91,17 +66,8 @@ static SpaceLink *statusbar_duplicate(SpaceLink *sl)
 /* add handlers, stuff you only do once or on area/region changes */
 static void statusbar_header_region_init(wmWindowManager * /*wm*/, ARegion *region)
 {
-  /* Touch: LEFT joins RIGHT here. The keyboard button sits in a left-aligned split region and has
-   * to be exactly as wide as itself; see statusbar_create(). */
-  if (ELEM(RGN_ALIGN_ENUM_FROM_MASK(region->alignment), RGN_ALIGN_RIGHT, RGN_ALIGN_LEFT)) {
+  if (ELEM(RGN_ALIGN_ENUM_FROM_MASK(region->alignment), RGN_ALIGN_RIGHT)) {
     region->flag |= RGN_FLAG_DYNAMIC_SIZE;
-  }
-  else {
-    /* Touch: and the other region must not have it. Upstream set it on the one header this space
-     * used to have, so a file saved before the split -- the bundled startup.blend included --
-     * restores the figures region with the flag already on. Sized to its own content, and with
-     * spacers in it asking for whatever is going spare, it came out empty. */
-    region->flag &= ~RGN_FLAG_DYNAMIC_SIZE;
   }
   ED_region_header_init(region);
 }

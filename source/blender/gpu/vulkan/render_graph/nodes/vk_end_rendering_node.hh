@@ -60,12 +60,7 @@ class VKEndRenderingNode : public VKNodeInfo<VKNodeType::END_RENDERING,
                       Span<uint8_t> /*storage_push_constants*/,
                       VKBoundPipelines & /*r_bound_pipelines*/) override
   {
-    if (command_buffer.use_render_pass_fallback) {
-      end_rendering_fallback(command_buffer);
-    }
-    else {
-      command_buffer.end_rendering();
-    }
+    command_buffer.end_rendering();
   }
 };
 }  // namespace blender::gpu::render_graph

@@ -25,6 +25,7 @@ struct ImBuf;
 struct rctf;
 struct rcti;
 
+struct ColorManagedColorspaceSettings;
 struct ImageFormatData;
 struct Stereo3dFormat;
 
@@ -53,16 +54,17 @@ ImBuf *IMB_load_image_from_memory(const unsigned char *mem,
                                   ImBufFlags flags,
                                   const char *descr,
                                   const char *filepath = nullptr,
-                                  char r_colorspace[IM_MAX_SPACE] = nullptr);
+                                  ColorManagedColorspaceSettings *colorspace_settings = nullptr);
 
-ImBuf *IMB_load_image_from_file_descriptor(int file,
-                                           ImBufFlags flags,
-                                           const char *filepath = nullptr,
-                                           char r_colorspace[IM_MAX_SPACE] = nullptr);
+ImBuf *IMB_load_image_from_file_descriptor(
+    int file,
+    ImBufFlags flags,
+    const char *filepath = nullptr,
+    ColorManagedColorspaceSettings *colorspace_settings = nullptr);
 
 ImBuf *IMB_load_image_from_filepath(const char *filepath,
                                     ImBufFlags flags,
-                                    char r_colorspace[IM_MAX_SPACE] = nullptr);
+                                    ColorManagedColorspaceSettings *colorspace_settings = nullptr);
 
 /**
  * Save image.
@@ -113,7 +115,8 @@ eImFileTypeCapability IMB_ftype_capability_write(eImbFileType ftype);
  */
 enum class IMBThumbLoadFlags {
   Zero = 0,
-  /** Normally files larger than 100MB are not loaded for thumbnails, except when this flag is set.
+  /**
+   * Normally files larger than 100MB are not loaded for thumbnails, except when this flag is set.
    */
   LoadLargeFiles = (1 << 0),
 };
@@ -121,7 +124,7 @@ ENUM_OPERATORS(IMBThumbLoadFlags);
 
 ImBuf *IMB_thumb_load_image(const char *filepath,
                             size_t max_thumb_size,
-                            char colorspace[IM_MAX_SPACE],
+                            ColorManagedColorspaceSettings *colorspace_settings,
                             IMBThumbLoadFlags load_flags = IMBThumbLoadFlags::Zero);
 
 /**
@@ -290,23 +293,6 @@ void IMB_rectclip(ImBuf *dbuf,
                   int *srcy,
                   int *width,
                   int *height);
-void IMB_rectblend(ImBuf *dbuf,
-                   const ImBuf *obuf,
-                   const ImBuf *sbuf,
-                   unsigned short *dmask,
-                   const unsigned short *curvemask,
-                   const unsigned short *texmask,
-                   float mask_max,
-                   int destx,
-                   int desty,
-                   int origx,
-                   int origy,
-                   int srcx,
-                   int srcy,
-                   int width,
-                   int height,
-                   IMB_BlendMode mode,
-                   bool accumulate);
 void IMB_rectblend_threaded(ImBuf *dbuf,
                             const ImBuf *obuf,
                             const ImBuf *sbuf,
@@ -324,6 +310,29 @@ void IMB_rectblend_threaded(ImBuf *dbuf,
                             int height,
                             IMB_BlendMode mode,
                             bool accumulate);
+/**
+ * \param dbuf_byte_data: Result of `dbuf->byte_data_for_write()`.
+ * \param dbuf_float_data: Result of `dbuf->float_data_for_write()`.
+ */
+void IMB_rectblend(ImBuf *dbuf,
+                   uint8_t *dbuf_byte_data,
+                   float *dbuf_float_data,
+                   const ImBuf *obuf,
+                   const ImBuf *sbuf,
+                   unsigned short *dmask,
+                   const unsigned short *curvemask,
+                   const unsigned short *texmask,
+                   float mask_max,
+                   int destx,
+                   int desty,
+                   int origx,
+                   int origy,
+                   int srcx,
+                   int srcy,
+                   int width,
+                   int height,
+                   IMB_BlendMode mode,
+                   bool accumulate);
 
 enum eIMBInterpolationFilterMode {
   IMB_FILTER_NEAREST,
@@ -536,7 +545,7 @@ void *imb_alloc_pixels(unsigned int x,
 bool IMB_alloc_byte_pixels(ImBuf *ibuf, bool initialize_pixels = true);
 
 /**
- * Deallocate image byte storage.
+ * Deallocate image byte storage. The colorspace is kept.
  */
 void IMB_free_byte_pixels(ImBuf *ibuf);
 
@@ -546,7 +555,7 @@ void IMB_free_byte_pixels(ImBuf *ibuf);
  */
 bool IMB_alloc_float_pixels(ImBuf *ibuf, unsigned int channels, bool initialize_pixels = true);
 /**
- * Deallocate image float storage.
+ * Deallocate image float storage. The colorspace is kept.
  */
 void IMB_free_float_pixels(ImBuf *ibuf);
 
@@ -623,9 +632,7 @@ gpu::Texture *IMB_create_gpu_texture(const char *name, ImBuf *ibuf, GPUTextureCr
  * yet. */
 gpu::Texture *IMB_acquire_gpu_texture(const char *name,
                                       ImBuf *ibuf,
-                                      bool use_high_bitdepth,
-                                      bool use_premult,
-                                      bool limit_size,
+                                      GPUTextureCreateFlags texture_create_flags,
                                       bool try_only = false);
 
 gpu::TextureFormat IMB_gpu_get_texture_format(const ImBuf *ibuf,

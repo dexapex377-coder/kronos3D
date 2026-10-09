@@ -751,7 +751,7 @@ void DrawCommandBuf::finalize_commands(Vector<Header, 0> &headers,
     GPU_batch_draw_parameter_get(
         cmd.batch, &batch_vert_len, &batch_vert_first, &batch_base_index, &batch_inst_len);
     /* Instancing attributes are not supported using the new pipeline since we use the base
-     * instance to set the correct resource_id. Workaround is a storage_buf + gl_InstanceID. */
+     * instance to set the correct resource_id. Workaround is a storage_buf + gpu_InstanceIndex. */
     BLI_assert(batch_inst_len == 1);
 
     if (cmd.vertex_len == uint(-1)) {
@@ -824,7 +824,7 @@ void DrawMultiBuf::generate_commands(Vector<Header, 0> & /*headers*/,
                                                          group.desc.vertex_first;
     group.base_index = batch_base_index;
     /* Instancing attributes are not supported using the new pipeline since we use the base
-     * instance to set the correct resource_id. Workaround is a storage_buf + gl_InstanceID. */
+     * instance to set the correct resource_id. Workaround is a storage_buf + gpu_InstanceIndex. */
     BLI_assert(batch_inst_len == 1);
     UNUSED_VARS_NDEBUG(batch_inst_len);
 
@@ -856,96 +856,6 @@ void DrawMultiBuf::generate_commands(Vector<Header, 0> & /*headers*/,
   command_buf_.get_or_resize(group_count_ * 2);
 
   if (prototype_count_ > 0) {
-#ifdef __ANDROID__
-    UNUSED_VARS(visibility_buf);
-    /* Qualcomm's Adreno 750 Android driver rejects the command-generation compute shader. Build
-     * the same indirect commands on the CPU without visibility compaction. This keeps rendering
-     * correct at the cost of drawing off-screen resources, which is preferable for the Android
-     * compatibility profile. */
-    Array<uint> back_offsets(group_count_);
-    Array<uint> front_offsets(group_count_);
-    const uint view_shift = log2_ceil_u(view_len);
-
-    for (const uint group_id : IndexRange(group_count_)) {
-      DrawGroup &group = group_buf_[group_id];
-      const uint back_facing_len = group.len - group.front_facing_len;
-      const uint back_facing_start = group.start * uint(view_len);
-      const uint front_facing_start = (group.start + back_facing_len) * uint(view_len);
-      back_offsets[group_id] = back_facing_start;
-      front_offsets[group_id] = front_facing_start;
-
-      DrawCommand &back_cmd = command_buf_[group_id * 2 + 0];
-      DrawCommand &front_cmd = command_buf_[group_id * 2 + 1];
-      back_cmd = {};
-      front_cmd = {};
-      if (group.base_index != -1) {
-        back_cmd.indexed() = {uint(group.vertex_len),
-                              back_facing_len * uint(view_len),
-                              uint(group.vertex_first),
-                              uint(group.base_index),
-                              back_facing_start,
-                              0,
-                              0,
-                              0};
-        front_cmd.indexed() = {uint(group.vertex_len),
-                               group.front_facing_len * uint(view_len),
-                               uint(group.vertex_first),
-                               uint(group.base_index),
-                               front_facing_start,
-                               0,
-                               0,
-                               0};
-      }
-      else {
-        back_cmd.array() = {uint(group.vertex_len),
-                            back_facing_len * uint(view_len),
-                            uint(group.vertex_first),
-                            back_facing_start,
-                            0,
-                            0,
-                            0,
-                            0};
-        front_cmd.array() = {uint(group.vertex_len),
-                             group.front_facing_len * uint(view_len),
-                             uint(group.vertex_first),
-                             front_facing_start,
-                             0,
-                             0,
-                             0,
-                             0};
-      }
-    }
-
-    for (const DrawPrototype &proto :
-         Span<DrawPrototype>(prototype_buf_.data(), prototype_count_))
-    {
-      const bool is_inverted = (proto.res_id & 0x80000000u) != 0;
-      const uint resource_id = proto.res_id & 0x7fffffffu;
-      uint &dst_index = is_inverted ? back_offsets[proto.group_id] :
-                                      front_offsets[proto.group_id];
-      for (const uint instance : IndexRange(proto.instance_len)) {
-        UNUSED_VARS(instance);
-        for (const uint view_index : IndexRange(view_len)) {
-          const uint packed_id = visibility_word_per_draw > 0 ?
-                                     (view_index | (resource_id << view_shift)) :
-                                     resource_id;
-          if (use_custom_ids) {
-            resource_id_buf_[dst_index * 2] = packed_id;
-            resource_id_buf_[dst_index * 2 + 1] = proto.custom_id;
-          }
-          else {
-            resource_id_buf_[dst_index] = packed_id;
-          }
-          dst_index++;
-        }
-      }
-    }
-
-    group_buf_.push_update();
-    resource_id_buf_.push_update();
-    command_buf_.push_update();
-    GPU_storagebuf_sync_as_indirect_buffer(command_buf_);
-#else
     gpu::Shader *shader = DRW_shader_draw_command_generate_get();
     GPU_shader_bind(shader);
     GPU_shader_uniform_1i(shader, "prototype_len", prototype_count_);
@@ -962,7 +872,6 @@ void DrawMultiBuf::generate_commands(Vector<Header, 0> & /*headers*/,
     /* TODO(@fclem): Investigate moving the barrier in the bind function. */
     GPU_memory_barrier(GPU_BARRIER_SHADER_STORAGE);
     GPU_storagebuf_sync_as_indirect_buffer(command_buf_);
-#endif
   }
 
   GPU_debug_group_end();

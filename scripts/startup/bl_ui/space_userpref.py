@@ -229,7 +229,6 @@ class USERPREF_PT_interface_display(InterfacePanel, CenterAlignMixIn, Panel):
         col = layout.column()
 
         col.prop(view, "ui_scale", text="Resolution Scale")
-        col.prop(view, "ui_scale_menu", text="Menu Scale")
         col.prop(view, "ui_line_width", text="Line Width")
         col.prop(view, "show_splash", text="Splash Screen")
         col.prop(view, "show_developer_ui")
@@ -590,7 +589,19 @@ class USERPREF_PT_edit_sequence_editor(EditingPanel, CenterAlignMixIn, Panel):
         prefs = context.preferences
         edit = prefs.edit
 
-        layout.prop(edit, "connect_strips_by_default")
+        layout.prop(edit, "clamp_strips_by_default")
+
+
+class USERPREF_PT_edit_sequence_editor_new_strips(EditingPanel, CenterAlignMixIn, Panel):
+    bl_label = "New Strips"
+    bl_parent_id = "USERPREF_PT_edit_sequence_editor"
+
+    def draw_centered(self, context, layout):
+        prefs = context.preferences
+        edit = prefs.edit
+
+        layout.prop(edit, "default_strip_length", text="Strip Length")
+        layout.prop(edit, "connect_strips_by_default", text="Connect Movie Strips")
 
 
 class USERPREF_PT_edit_misc(EditingPanel, CenterAlignMixIn, Panel):
@@ -682,7 +693,7 @@ class USERPREF_PT_animation_timeline_advanced(AnimationPanel, CenterAlignMixIn, 
         edit = prefs.edit
 
         layout.prop(edit, "use_negative_frames")
-        split = layout.split(factor=0.4)
+        split = layout.split(factor=layout.property_split_factor)
         split.active = edit.use_negative_frames
         split.separator()
         split.label_multiline(
@@ -718,135 +729,6 @@ class USERPREF_PT_system_sound(SystemPanel, CenterAlignMixIn, Panel):
         sub.prop(system, "audio_sample_format", text="Sample Format")
 
 
-def _device_hardware_groups():
-    """Touch: what the machine actually is, for the Cycles device panel.
-
-    On a phone that panel is a single button reading "None", which means "no GPU compute device"
-    and reads as "no hardware". Everything below it is what the desktop panel gets from the device
-    list, and a phone has nothing to fill it in with, so it is filled in from what the system will
-    say about itself.
-
-    Returns a list of groups, each a list of (label, value) pairs, so the caller can put a little
-    air between them. A pair with an empty label continues the one above it.
-
-    The device and chip names come from BlenderActivity, which reads them off android.os.Build and
-    sets them in the environment: nothing on the Linux side of the process can see them, since
-    /proc/cpuinfo carries no model name on arm64 and the sysfs and device-tree paths that do are
-    closed to apps.
-
-    Read once and kept. Nothing here changes while Blender is running.
-
-    Every read stands alone. A line whose source is missing or unreadable is left out rather than
-    guessed at, because nothing here is worth an exception during a draw.
-    """
-    cache = _device_hardware_groups._cache
-    if cache is not None:
-        return cache
-
-    import os
-
-    identity = []
-
-    for label, key in (("Device", "BLENDER_ANDROID_DEVICE"), ("Processor", "BLENDER_ANDROID_SOC")):
-        value = os.environ.get(key, "").strip()
-        if value:
-            identity.append((label, value))
-
-    # GPU. Blender already knows this one, from the device it is drawing with.
-    try:
-        import gpu
-        renderer = gpu.platform.renderer_get().strip()
-        if renderer:
-            identity.append(("GPU", renderer))
-    except Exception:
-        pass
-
-    # Cores. The count only: which cluster runs at what clock is real, and read correctly, but it
-    # is four more lines to say something nobody chooses a render device on.
-    try:
-        count = 0
-        with open("/proc/cpuinfo", "r") as f:
-            for line in f:
-                if line.startswith("processor"):
-                    count += 1
-        if count == 0:
-            count = os.cpu_count() or 0
-        if count:
-            identity.append(("Cores", "{:d}".format(count)))
-    except Exception:
-        pass
-
-    groups = []
-    if identity:
-        groups.append(identity)
-
-    # Memory: what was fitted and what the kernel kept, with what Blender may actually have added
-    # live by the caller. Three figures that disagree, and none of the disagreements is a mistake.
-    #
-    # MemTotal is what the kernel has left after the firmware, the modem and the display carve out
-    # their reservations, so a 12 GB phone reports around 10.8 GiB of it. Neither Linux nor Android
-    # will say what was fitted, so the headline number is the nearest capacity a phone is actually
-    # sold with -- inferred, and printed beside the figure it was inferred from rather than instead
-    # of it.
-    try:
-        with open("/proc/meminfo", "r") as f:
-            for line in f:
-                key, _, rest = line.partition(":")
-                if key != "MemTotal":
-                    continue
-                total_gib = int(rest.strip().split()[0]) / 1048576.0
-                fitted = next(
-                    (size for size in (1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64)
-                     if size >= total_gib),
-                    None,
-                )
-                memory = []
-                if fitted is not None:
-                    memory.append(("Memory", "{:d} GB fitted".format(fitted)))
-                    memory.append(("", "{:.1f} GB to the system".format(total_gib)))
-                else:
-                    memory.append(("Memory", "{:.1f} GB to the system".format(total_gib)))
-                groups.append(memory)
-                break
-    except Exception:
-        pass
-
-    if groups:
-        _device_hardware_groups._cache = groups
-    return groups
-
-
-_device_hardware_groups._cache = None
-
-
-def _device_memory_available():
-    """Touch: how much graphics memory Blender may actually use, as a row for the device panel.
-
-    The third memory figure, and the only one of the three that decides whether a scene fits. It
-    comes from the same call the status bar reports, so the panel and the status bar agree by
-    construction rather than by being kept in step by hand.
-
-    On a phone there is no separate graphics memory. The driver hands out a share of the one pool,
-    which is also Android's and every other app's, and it is a good deal smaller than the RAM the
-    phone was sold with: a device-local heap covering all of system memory, minus what the driver
-    will not promise. Reported alongside the other two so the gap is visible rather than puzzling.
-
-    Deliberately not cached with the static facts: those never change while Blender runs, this one
-    can. Returns None where the backend will not report it.
-    """
-    try:
-        import gpu
-        stats = gpu.capabilities.memory_statistics_get()
-    except Exception:
-        return None
-
-    if not stats:
-        return None
-
-    total_kb, _in_use_kb = stats
-    return ("", "{:.1f} GB for Blender".format(total_kb / 1048576.0))
-
-
 class USERPREF_PT_system_cycles_devices(SystemPanel, CenterAlignMixIn, Panel):
     bl_label = "Cycles Render Devices"
 
@@ -856,56 +738,15 @@ class USERPREF_PT_system_cycles_devices(SystemPanel, CenterAlignMixIn, Panel):
         col = layout.column()
         col.use_property_split = False
 
-        # Touch: "None" is the only compute device a phone offers, and on its own it says nothing
-        # about what the rendering will actually run on. Whatever the device will tell us about
-        # itself goes underneath it, in place of the device list the desktop fills this panel with.
-        show_hardware = True
-
         if bpy.app.build_options.cycles:
             addon = prefs.addons.get("cycles")
             if addon is None:
                 layout.label(text="Enable Cycles Render Engine add-on to use Cycles", icon='STATUS_INFO')
             else:
                 addon.preferences.draw_impl(col, context)
-                try:
-                    # Only where the device list left the panel empty. With a GPU compute device
-                    # selected the list already names the hardware, one line per device.
-                    show_hardware = addon.preferences.compute_device_type == 'NONE'
-                except Exception:
-                    pass
             del addon
         else:
             layout.label(text="Cycles is disabled in this build", icon='STATUS_INFO')
-
-        if show_hardware:
-            try:
-                hardware = _device_hardware_groups()
-            except Exception:
-                hardware = []
-
-            # Touch: the live figure joins the memory group, which is the last one.
-            available = _device_memory_available()
-            if hardware and available:
-                hardware = hardware[:-1] + [hardware[-1] + [available]]
-
-            if hardware:
-                box = layout.box()
-                box.label(text="Rendering on the CPU")
-
-                # A two column table, laid out with a split rather than a row so the labels line
-                # up with each other instead of with whatever happens to be beside them. Held
-                # upright the panel is narrow, which is why every value is short enough to sit on
-                # one line and the clocks are one line each.
-                table = box.column(align=True)
-                for index, group in enumerate(hardware):
-                    if index != 0:
-                        table.separator()
-                    for label, value in group:
-                        split = table.split(factor=0.35)
-                        left = split.row()
-                        left.alignment = 'RIGHT'
-                        left.label(text=label)
-                        split.label(text=value, translate=False)
 
 
 class USERPREF_PT_system_display_graphics(SystemPanel, CenterAlignMixIn, Panel):
@@ -929,12 +770,6 @@ class USERPREF_PT_system_display_graphics(SystemPanel, CenterAlignMixIn, Panel):
             col.enabled = gpu.platform.backend_type_get() == 'VULKAN'
             col.prop(system, "gpu_preferred_device")
 
-        if 'android' in sys.platform:
-            col = layout.column()
-            col.prop(system, "android_render_scale", text="Android Render Scale")
-            col.label(text="1 renders at native resolution; lower values are faster but softer", icon='STATUS_INFO')
-            col.label(text="Applies on restart", icon='STATUS_INFO')
-
         if system.gpu_backend != gpu.platform.backend_type_get():
             layout.label(text="A restart of Blender is required", icon='STATUS_INFO')
 
@@ -950,23 +785,9 @@ class USERPREF_PT_system_os_settings(SystemPanel, CenterAlignMixIn, Panel):
 
     @classmethod
     def poll(cls, _context):
-        import sys
         # macOS isn't supported.
-        if sys.platform == "darwin":
-            return False
-        # Touch: nor is Android, which reports as "linux" and so was offered the
-        # freedesktop path. That shells out to xdg-mime, which does not exist on the
-        # platform and has no per-user MIME database to write to, so Register could only
-        # ever report "Could not find xdg-mime, unable to associate mime-types".
-        #
-        # Nothing is missing: a .blend tapped in a file manager already opens here. The
-        # association is an intent filter declared in the APK manifest, fixed at build
-        # time, and not something an app can register or unregister at runtime -- so
-        # this panel has nothing it could do even if the command existed.
-        #
-        # sys.getandroidapilevel is CPython's own marker and exists only on an Android
-        # build of the interpreter.
-        if hasattr(sys, "getandroidapilevel"):
+        from sys import platform
+        if platform == "darwin":
             return False
         return True
 
@@ -1016,7 +837,7 @@ class USERPREF_PT_system_network(SystemPanel, CenterAlignMixIn, Panel):
         # Show when the preference has been overridden and doesn't match the current preference.
         runtime_online_access = bpy.app.online_access
         if system.use_online_access != runtime_online_access:
-            row = layout.split(factor=0.4)
+            row = layout.split(factor=layout.property_split_factor)
             row.label(text="")
             if runtime_online_access:
                 text = iface_("Enabled on startup, overriding the preference.")
@@ -1086,6 +907,14 @@ class USERPREF_PT_system_video_sequencer(SystemPanel, CenterAlignMixIn, Panel):
         layout.separator()
 
         layout.prop(system, "sequencer_proxy_setup")
+
+        layout.separator()
+
+        layout.prop(system, "use_hardware_video_decoding")
+        if prefs.experimental.use_video_decoding_debug and prefs.view.show_developer_ui:
+            row = layout.row()
+            row.active = system.use_hardware_video_decoding
+            row.prop(system, "video_decoding_device")
 
 
 # -----------------------------------------------------------------------------
@@ -1456,6 +1285,7 @@ class USERPREF_PT_theme_interface_styles(ThemePanel, CenterAlignMixIn, Panel):
 
         col = flow.column()
         col.prop(ui, "widget_text_cursor")
+        col.prop(ui, "link")
 
 
 class USERPREF_PT_theme_interface_transparent_checker(ThemePanel, CenterAlignMixIn, Panel):
@@ -1583,20 +1413,39 @@ class USERPREF_PT_theme_bone_color_sets(ThemePanel, CenterAlignMixIn, Panel):
     bl_options = {'DEFAULT_CLOSED'}
     bl_parent_id = "USERPREF_PT_theme_color_sets"
 
+    @staticmethod
+    def create_column(layout, heading="", width=None):
+        col = layout.column(align=True)
+        if width is not None:
+            col.ui_units_x = width
+
+        row = col.row()
+        row.alignment = 'CENTER'
+        row.label(text=heading)
+
+        return col
+
     def draw_centered(self, context, layout):
         theme = context.preferences.themes[0]
 
-        layout.use_property_split = True
+        row = layout.row()
+
+        color_set_col = self.create_column(row)
+        color_set_col.alignment = 'RIGHT'
+
+        row.separator()
+
+        normal_col = self.create_column(row, heading="Normal")
+        selected_col = self.create_column(row, heading="Selected")
+        active_col = self.create_column(row, heading="Active")
+        constraints_col = self.create_column(row, heading="Colored Constraints", width=10)
 
         for i, ui in enumerate(theme.bone_color_sets, 1):
-            layout.label(text=iface_("Color Set {:d}").format(i), translate=False)
-
-            flow = layout.grid_flow(row_major=False, columns=0, even_columns=True, even_rows=False, align=True)
-
-            flow.prop(ui, "normal")
-            flow.prop(ui, "select", text="Selected")
-            flow.prop(ui, "active")
-            flow.prop(ui, "show_colored_constraints")
+            color_set_col.label(text=iface_("Color Set {:d}").format(i), translate=False)
+            normal_col.prop(ui, "normal", text="")
+            selected_col.prop(ui, "select", text="")
+            active_col.prop(ui, "active", text="")
+            constraints_col.prop(ui, "show_colored_constraints", text="")
 
 
 class USERPREF_PT_theme_collection_colors(ThemePanel, CenterAlignMixIn, Panel):
@@ -1925,14 +1774,25 @@ class USERPREF_PT_file_paths_development(FilePathsPanel, Panel):
 
 
 class USERPREF_PT_saveload_autorun(FilePathsPanel, Panel):
-    bl_label = "Auto Run Python Scripts"
+    # Drawn with the checkbox so the command line override can follow it.
+    bl_label = ""
     bl_parent_id = "USERPREF_PT_saveload_blend"
 
     def draw_header(self, context):
+        layout = self.layout
         prefs = context.preferences
         paths = prefs.filepaths
 
-        self.layout.prop(paths, "use_scripts_auto_execute", text="")
+        text = iface_("Auto Run Python Scripts")
+
+        if (autoexec_override := bpy.app.autoexec_override) is not None:
+            if autoexec_override:
+                text_warn = iface_("enabled on startup, overriding the preference")
+            else:
+                text_warn = iface_("disabled on startup, overriding the preference")
+            text = "{:s} ({:s})".format(text, text_warn)
+
+        layout.prop(paths, "use_scripts_auto_execute", text=text, translate=False)
 
     def draw(self, context):
         layout = self.layout
@@ -1943,6 +1803,14 @@ class USERPREF_PT_saveload_autorun(FilePathsPanel, Panel):
         layout.use_property_decorate = False  # No animation.
 
         layout.active = paths.use_scripts_auto_execute
+
+        if paths.use_scripts_auto_execute:
+            layout.label_multiline(
+                text=(
+                    "Opening blend files from the internet and other untrusted sources is unsafe with Auto-Run. Use with caution."
+                ),
+                icon='STATUS_WARNING',
+            )
 
         box = layout.box()
         row = box.row()
@@ -2514,13 +2382,6 @@ class USERPREF_PT_extensions_repos(Panel):
             split.prop(active_repo, "remote_url", text="", icon='INTERNET', placeholder="Repository URL")
             split = row.split()
 
-            if active_repo.use_access_token:
-                access_token_icon = 'LOCKED' if active_repo.access_token else 'UNLOCKED'
-                row = layout.row()
-                split = row.split(factor=0.936)
-                split.prop(active_repo, "access_token", icon=access_token_icon)
-                split = row.split()
-
             layout.prop(active_repo, "use_sync_on_startup")
 
         layout_header, layout_panel = layout.panel("advanced", default_closed=True)
@@ -2548,8 +2409,12 @@ class USERPREF_PT_extensions_repos(Panel):
                 sub.prop(active_repo, "directory", text="")
 
             if use_remote_url:
-                row = layout_panel.row(align=True, heading="Authentication")
-                row.prop(active_repo, "use_access_token")
+                col = layout_panel.column(align=True, heading="Authentication")
+                col.prop(active_repo, "use_access_token")
+
+                if active_repo.use_access_token:
+                    access_token_icon = 'LOCKED' if active_repo.access_token else 'UNLOCKED'
+                    col.prop(active_repo, "access_token", icon=access_token_icon)
 
                 layout_panel.prop(active_repo, "use_cache")
             else:
@@ -2605,7 +2470,6 @@ class USERPREF_PT_addons(AddOnPanel, Panel):
     _support_icon_mapping = {
         'OFFICIAL': 'BLENDER',
         'COMMUNITY': 'COMMUNITY',
-        'TESTING': 'EXPERIMENTAL',
     }
 
     @staticmethod
@@ -2836,7 +2700,7 @@ class USERPREF_PT_addons(AddOnPanel, Panel):
                 if value := bl_info["warning"]:
                     split = colsub.row().split(factor=0.15)
                     split.label(text="Warning:")
-                    split.label(text="  " + iface_(value), icon='STATUS_WARNING')
+                    split.label_multiline(text=iface_(value), icon='STATUS_WARNING')
                 del value
 
                 user_addon = USERPREF_PT_addons.is_user_addon(mod, user_addon_paths)
@@ -3150,6 +3014,7 @@ class USERPREF_PT_developer_tools(Panel):
                 ({"property": "use_viewport_debug"}, None),
                 ({"property": "use_eevee_debug"}, None),
                 ({"property": "use_paint_debug"}, None),
+                ({"property": "use_video_decoding_debug"}, None),
                 ({"property": "use_extensions_debug"}, ("/blender/blender/issues/119521", "#119521")),
                 ({"property": "write_legacy_blend_file_format"}, ("/blender/blender/issues/129309", "#129309")),
                 ({"property": "no_data_block_packing"}, ("/blender/blender/issues/132167", "#132167")),
@@ -3211,7 +3076,7 @@ class USERPREF_PT_experimental_prototypes(ExperimentalPanel, Panel):
             context.preferences,
             (
                 ({"property": "use_new_curves_tools"}, ("blender/blender/issues/68981", "#68981")),
-                ({"property": "use_sculpt_texture_paint"}, ("blender/blender/issues/96225", "#96225")),
+                ({"property": "use_3d_texture_paint"}, ("blender/blender/issues/156410", "#156410")),
             ),
         )
 
@@ -3273,6 +3138,7 @@ classes = (
     USERPREF_PT_edit_text_editor,
     USERPREF_PT_edit_node_editor,
     USERPREF_PT_edit_sequence_editor,
+    USERPREF_PT_edit_sequence_editor_new_strips,
     USERPREF_PT_edit_misc,
 
     USERPREF_PT_animation_timeline,

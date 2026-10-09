@@ -13,9 +13,6 @@
 
 #include "BLI_threads.hh"
 #include "BLI_utility_mixins.hh"
-#include <mutex>
-
-#include "BLI_map.hh"
 #include "BLI_vector.hh"
 
 #include "render_graph/vk_render_graph.hh"
@@ -27,7 +24,6 @@
 #include "vk_descriptor_set_layouts.hh"
 #include "vk_memory_pool.hh"
 #include "vk_pipeline_pool.hh"
-#include "vk_render_pass_fallback.hh"
 #include "vk_resource_pool.hh"
 #include "vk_samplers.hh"
 #include "vk_vertex_attribute_object.hh"
@@ -36,10 +32,6 @@ namespace blender::gpu {
 class VKBackend;
 
 struct VKExtensions {
-  /** Does the device support VkPhysicalDeviceVulkan12Features::shaderOutputViewportIndex. */
-  bool shader_output_viewport_index = false;
-  /** Does the device support VkPhysicalDeviceVulkan12Features::shaderOutputLayer. */
-  bool shader_output_layer = false;
   /**
    * Does the device support
    * VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR::fragmentShaderBarycentric.
@@ -51,30 +43,6 @@ struct VKExtensions {
    * VkPhysicalDeviceFeatures::wideLines
    */
   bool wide_lines = false;
-
-  /**
-   * Does the device support VK_KHR_dynamic_rendering (core in Vulkan 1.3).
-   *
-   * When false (e.g. Vulkan 1.1 mobile GPUs like Adreno 642L) the backend falls
-   * back to classic VkRenderPass/VkFramebuffer instead of vkCmdBeginRendering.
-   */
-  bool dynamic_rendering = false;
-
-  /**
-   * Does the device support VkPhysicalDeviceFeatures::multiViewport.
-   *
-   * Writing gl_ViewportIndex declares the MultiViewport SPIR-V capability, which is invalid
-   * without it. Mobile GPUs commonly expose a single viewport.
-   */
-  bool multi_viewport = false;
-
-  /**
-   * Does the device support VK_KHR_separate_depth_stencil_layouts (core in Vulkan 1.2).
-   *
-   * When false the depth-only/stencil-only image layouts don't exist and the combined
-   * depth/stencil layouts must be used instead.
-   */
-  bool separate_depth_stencil_layouts = false;
 
   /**
    * Does the device support VK_KHR_dynamic_rendering_local_read enabled.
@@ -93,17 +61,6 @@ struct VKExtensions {
 
   /** VK_KHR_maintenance4 */
   bool maintenance4 = false;
-
-  /**
-   * Does the device support logic ops.
-   */
-  bool logic_ops = false;
-
-  /**
-   * Does the device support VK_EXT_provoking_vertex (last-vertex convention).
-   * When false the default first-vertex convention is used for flat shading.
-   */
-  bool provoking_vertex = false;
 
   /**
    * Does the device support VK_EXT_memory_priority
@@ -136,9 +93,35 @@ struct VKExtensions {
   bool vertex_input_dynamic_state = false;
 
   /**
+   * Does the device support VK_EXT_provoking_vertex
+   */
+  bool provoking_vertex = false;
+
+  /**
    * Does the device support VK_EXT_host_image_copy
    */
   bool host_image_copy = false;
+
+  /**
+   * Does the device support VK_EXT_shader_viewport_index_layer.
+   */
+  bool shader_viewport_index_layer = false;
+
+  /**
+   * Does the device support VK_KHR_spirv_1_4.
+   */
+  bool spirv_1_4 = false;
+
+  /**
+   * Does the device support VkPhysicalDeviceFeatures::multiDrawIndirect.
+   * When false, multi_draw_indirect is emulated with individual draw calls.
+   */
+  bool multi_draw_indirect = false;
+
+  /**
+   * Device supports `shaderClipDistance` feature.
+   */
+  bool shader_clip_distance = false;
 
   /** Log enabled features and extensions. */
   void log() const;
@@ -152,6 +135,15 @@ struct VKWorkarounds {
    * If set to true we should work around this issue by using a different texture format.
    */
   bool not_aligned_pixel_formats = false;
+
+  /**
+   * Some Qualcomm drivers keep command-buffer-local state written by `vkCmdSetViewport` across
+   * command buffer resets.
+   *
+   * When set, viewports and scissors are baked into the pipeline as static state and
+   * `vkCmdSetViewport`/`vkCmdSetScissor` are never used.
+   */
+  bool static_viewport_scissor = false;
 
   /** Log enabled workarounds. */
   void log() const;
@@ -236,7 +228,6 @@ class VKDevice : public NonCopyable {
   VkPhysicalDeviceProperties vk_physical_device_properties_ = {};
   VkPhysicalDeviceDriverProperties vk_physical_device_driver_properties_ = {};
   VkPhysicalDeviceIDProperties vk_physical_device_id_properties_ = {};
-  VkPhysicalDeviceSubgroupProperties vk_physical_device_subgroup_properties_ = {};
   VkPhysicalDeviceMemoryProperties vk_physical_device_memory_properties_ = {};
   VkPhysicalDeviceMaintenance4Properties vk_physical_device_maintenance4_properties_ = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES};
@@ -249,7 +240,6 @@ class VKDevice : public NonCopyable {
   /** Features support. */
   VkPhysicalDeviceFeatures vk_physical_device_features_ = {};
   VkPhysicalDeviceVulkan11Features vk_physical_device_vulkan_11_features_ = {};
-  VkPhysicalDeviceVulkan12Features vk_physical_device_vulkan_12_features_ = {};
   VkPhysicalDeviceAccelerationStructureFeaturesKHR
       vk_physical_device_acceleration_structure_features_ = {
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
@@ -271,10 +261,6 @@ class VKDevice : public NonCopyable {
 
   Shader *vk_backbuffer_blit_sh_ = nullptr;
 
-  /** Cache for #format_supports_linear_filter, filled on demand. */
-  mutable Map<VkFormat, bool> format_linear_filter_support_;
-  mutable std::mutex format_linear_filter_mutex_;
-
  public:
   render_graph::VKResourceStateTracker resources;
   VKDiscardPool orphaned_data;
@@ -282,8 +268,6 @@ class VKDevice : public NonCopyable {
   VKDiscardPool orphaned_data_render;
   VKPipelinePool pipelines;
   VKVertexInputDescriptionPool vertex_input_descriptions;
-  /** Render-pass/framebuffer emulation for GPUs without dynamic rendering. */
-  VKRenderPassFallback render_pass_fallback;
 
   /** Buffer to bind to unbound resource locations. */
   VKBuffer dummy_buffer;
@@ -306,9 +290,6 @@ class VKDevice : public NonCopyable {
   {
     return vk_physical_device_properties_;
   }
-
-  /** Mobile GPUs commonly lack linear filtering for 32-bit float formats. */
-  bool format_supports_linear_filter(VkFormat vk_format) const;
 
   inline const VkPhysicalDeviceMaintenance4Properties &
   physical_device_maintenance4_properties_get() const
@@ -338,15 +319,6 @@ class VKDevice : public NonCopyable {
     return vk_physical_device_features_;
   }
 
-  const VkPhysicalDeviceVulkan11Features &physical_device_vulkan_11_features_get() const
-  {
-    return vk_physical_device_vulkan_11_features_;
-  }
-
-  const VkPhysicalDeviceVulkan12Features &physical_device_vulkan_12_features_get() const
-  {
-    return vk_physical_device_vulkan_12_features_;
-  }
   inline const VkPhysicalDeviceAccelerationStructureFeaturesKHR &
   physical_device_acceleration_structure_features_get() const
   {
@@ -428,6 +400,7 @@ class VKDevice : public NonCopyable {
   std::string glsl_fragment_patch_get(bool use_ray_query) const;
   std::string glsl_compute_patch_get(bool use_ray_query) const;
   shader::GeneratedSource extensions_define(StringRefNull stage_define, bool use_ray_query) const;
+  uint32_t glsl_patch_version_get(bool use_ray_query) const;
 
   /* -------------------------------------------------------------------- */
   /** \name Render graph
@@ -448,25 +421,13 @@ class VKDevice : public NonCopyable {
   void wait_queue_idle();
 
   /**
-   * Set when the device is lost: either a submission returned VK_ERROR_DEVICE_LOST, or the
-   * timeline stopped advancing (a wedged GPU is not always reported as device lost). Neither
-   * recovers, so waits and submissions bail out instead of blocking forever while holding the
-   * draw lock, which would otherwise hang the app until the watchdog kills it.
-   */
-  std::atomic<bool> device_lost_ = false;
-  bool is_device_lost() const
-  {
-    return device_lost_.load(std::memory_order_relaxed);
-  }
-
-  /**
    * Retrieve the last finished submission timeline.
    */
   TimelineValue submission_finished_timeline_get() const
   {
     BLI_assert(vk_timeline_semaphore_ != VK_NULL_HANDLE);
     TimelineValue current_timeline;
-    VkResult result = functions.vkGetSemaphoreCounterValue(
+    VkResult result = functions.vkGetSemaphoreCounterValueKHR(
         vk_device_, vk_timeline_semaphore_, &current_timeline);
     UNUSED_VARS(result);
     BLI_assert_msg(
@@ -495,8 +456,6 @@ class VKDevice : public NonCopyable {
   Span<std::reference_wrapper<VKContext>> contexts_get() const;
 
   void memory_statistics_get(int *r_total_mem_kb, int *r_free_mem_kb) const;
-  /** Touch: false for a heap only protected memory types point at; see the definition. */
-  bool memory_heap_is_allocatable(uint32_t memory_heap_index) const;
   void debug_print() const;
 
   /** \} */

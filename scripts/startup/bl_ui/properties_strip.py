@@ -233,10 +233,13 @@ class STRIP_PT_effect(StripButtonsPanel, Panel):
             row.prop(strip, "input_1")
 
             if strip.input_count > 1:
-                row.operator("sequencer.swap_inputs", text="", icon='SORT_ASC')
+                is_transition = strip_type in {'CROSS', 'GAMMA_CROSS', 'WIPE', 'COMPOSITOR'}
+                if not is_transition:
+                    row.operator("sequencer.swap_inputs", text="", icon='SORT_ASC')
                 row = col.row()
                 row.prop(strip, "input_2")
-                row.operator("sequencer.swap_inputs", text="", icon='SORT_DESC')
+                if not is_transition:
+                    row.operator("sequencer.swap_inputs", text="", icon='SORT_DESC')
 
         if strip_type == 'COLOR':
             layout.template_color_picker(strip, "color", value_slider=True, cubic=True)
@@ -313,7 +316,7 @@ class STRIP_PT_effect(StripButtonsPanel, Panel):
         elif strip_type == 'TEXT':
             layout = self.layout
             col = layout.column()
-            col.textbox_with_state(strip, "text", textbox_state=strip.textbox_state)
+            col.textbox_with_state(strip, "text", text="", textbox_state=strip.textbox_state)
             layout.prop(strip, "wrap_width", text="Wrap Width")
 
         col = layout.column(align=True)
@@ -329,6 +332,9 @@ class STRIP_PT_effect(StripButtonsPanel, Panel):
             layout.prop(strip, "blend_effect", text="Blend Mode")
             row = layout.row(align=True)
             row.prop(strip, "factor", slider=True)
+
+        if strip_type == 'COMPOSITOR':
+            layout.template_compositor_strip_inputs(strip)
 
 
 class STRIP_PT_effect_text_layout(StripButtonsPanel, Panel):
@@ -696,7 +702,7 @@ class STRIP_PT_scene_sound(StripButtonsPanel, Panel):
         col = layout.column()
 
         col.use_property_decorate = True
-        split = col.split(factor=0.4)
+        split = col.split(factor=col.property_split_factor)
         split.alignment = 'RIGHT'
         split.label(text="Strip Volume", text_ctxt=i18n_contexts.id_sound)
         split.prop(strip, "volume", text="")
@@ -916,7 +922,7 @@ class STRIP_PT_adjust_sound(StripButtonsPanel, Panel):
             layout.use_property_split = True
             col = layout.column()
 
-            split = col.split(factor=0.4)
+            split = col.split(factor=col.property_split_factor)
             split.alignment = 'RIGHT'
             split.label(text="Volume", text_ctxt=i18n_contexts.id_sound)
             split.prop(strip, "volume", text="")
@@ -925,7 +931,7 @@ class STRIP_PT_adjust_sound(StripButtonsPanel, Panel):
             layout.use_property_split = False
             col = layout.column()
 
-            split = col.split(factor=0.4)
+            split = col.split(factor=col.property_split_factor)
             split.label(text="")
             split.prop(sound, "use_mono")
 
@@ -936,14 +942,14 @@ class STRIP_PT_adjust_sound(StripButtonsPanel, Panel):
             pan_enabled = sound.use_mono and audio_channels != 'MONO'
             pan_text = "{:.2f}°".format(strip.pan * 90.0)
 
-            split = col.split(factor=0.4)
+            split = col.split(factor=col.property_split_factor)
             split.alignment = 'RIGHT'
             split.label(text="Pan", text_ctxt=i18n_contexts.id_sound)
             split.prop(strip, "pan", text="")
             split.enabled = pan_enabled
 
             if audio_channels not in {'MONO', 'STEREO'}:
-                split = col.split(factor=0.4)
+                split = col.split(factor=col.property_split_factor)
                 split.alignment = 'RIGHT'
                 split.label(text="Pan Angle")
                 split.enabled = pan_enabled
@@ -956,11 +962,11 @@ class STRIP_PT_adjust_sound(StripButtonsPanel, Panel):
             layout.use_property_split = False
             col = layout.column()
 
-            split = col.split(factor=0.4)
+            split = col.split(factor=col.property_split_factor)
             split.label(text="")
             split.prop(strip, "pitch_correction")
 
-            split = col.split(factor=0.4)
+            split = col.split(factor=col.property_split_factor)
             split.label(text="")
             split.prop(strip, "show_waveform")
 

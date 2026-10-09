@@ -85,8 +85,6 @@ class VKDiscardPool {
   TimelineResources<std::pair<ResourceHandle, VmaAllocation>> buffers_;
   TimelineResources<VmaAllocation> allocations_;
   TimelineResources<VkImageView> image_views_;
-  /** Render-pass fallback framebuffers (freed with the views they reference). */
-  TimelineResources<VkFramebuffer> framebuffers_;
   TimelineResources<VkBufferView> buffer_views_;
   TimelineResources<VkShaderModule> shader_modules_;
   TimelineResources<VkPipeline> pipelines_;
@@ -105,7 +103,6 @@ class VKDiscardPool {
   void discard_image(VkImage vk_image, VmaAllocation vma_allocation);
   void discard_allocation(VmaAllocation vma_allocation);
   void discard_image_view(VkImageView vk_image_view);
-  void discard_framebuffer(VkFramebuffer vk_framebuffer);
   void discard_buffer(ResourceHandle buffer_handle, VmaAllocation vma_allocation);
   void discard_buffer_view(VkBufferView vk_buffer_view);
   void discard_shader_module(VkShaderModule vk_shader_module);

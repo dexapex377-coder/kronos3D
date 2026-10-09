@@ -19,6 +19,7 @@ namespace blender {
 
 struct Base;
 struct Object;
+struct ViewLayerRuntime;
 
 using ObjectBasesMap = Map<const Object *, Base *>;
 
@@ -45,7 +46,7 @@ enum eViewLayerEEVEEPassType : int {
   EEVEE_RENDER_PASS_AOV = (1 << 15),
   /*
    * TODO(@jbakker): Clean up conflicting bits after EEVEE has been removed.
-   * #EEVEE_RENDER_PASS_CRYPTOMATTE is for EEVEE, `EEVEE_RENDER_PASS_CRYTPOMATTE_*` are for
+   * #EEVEE_RENDER_PASS_CRYPTOMATTE is for EEVEE, `EEVEE_RENDER_PASS_CRYPTOMATTE_*` are for
    * EEVEE-Next.
    */
   EEVEE_RENDER_PASS_CRYPTOMATTE = (1 << 16),
@@ -301,9 +302,12 @@ struct ViewLayer {
   ListBaseT<ViewLayerLightgroup> lightgroups = {nullptr, nullptr};
   ViewLayerLightgroup *active_lightgroup = nullptr;
 
-  /* Runtime data */
-  struct Base **object_bases_array = nullptr;
-  ObjectBasesMap *object_bases_hash = nullptr;
+  ViewLayerRuntime *runtime = nullptr;
+
+#ifdef __cplusplus
+  /** This is the same as #object_bases but cached as an array for faster index-based access. */
+  Span<Base *> object_bases_array() const;
+#endif
 };
 
 }  // namespace blender

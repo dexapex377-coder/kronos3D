@@ -45,8 +45,15 @@ struct GPUCapabilities {
   bool mem_stats_support = false;
   bool geometry_shader_support = false;
   bool hdr_viewport_support = false;
+  bool multi_viewport_support = false;
   bool stencil_export_support = false;
   bool ray_query_support = false;
+  bool vertex_pipeline_stores_and_atomics_support = false;
+
+  /** Can an sRGB texture be written, with the hardware performing conversion to sRGB? */
+  bool srgb_write_direct_support = false;
+  /* Can an sRGB texture be bound as writable with a non-sRGB (UNORM) view? */
+  bool srgb_write_view_support = false;
 
   int max_parallel_compilations = -1;
 
@@ -54,13 +61,8 @@ struct GPUCapabilities {
   bool depth_blitting_workaround = false;
   bool use_main_context_workaround = false;
   bool use_hq_normals_workaround = false;
-  bool stencil_clasify_buffer_workaround = false;
+  bool stencil_classify_buffer_workaround = false;
   bool texture_pool_workaround = false;
-  /* Set when the driver refused to build one of the subdivision evaluation compute
-   * pipelines. Those shaders are valid SPIR-V, but Qualcomm's Adreno compiler rejects
-   * some of them, and a substituted do-nothing pipeline leaves the evaluated surface
-   * empty. Subdivision then has to be evaluated on the CPU instead. */
-  bool subdivision_evaluation_broken = false;
 
   bool use_subprocess_shader_compilations = false;
 

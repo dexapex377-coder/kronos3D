@@ -37,14 +37,6 @@
 
 static android_app *g_android_app = nullptr;
 
-/* Set from Blender's user preferences (UserDef::android_render_scale), see
- * GHOST_AndroidMemoryTier.hh. C linkage so the WindowManager can declare and
- * call it across the GHOST/WM boundary (wm_window.cc) by unmangled name. */
-extern "C" void GHOST_android_set_render_scale_divisor(float divisor)
-{
-  GHOST_android_render_scale_divisor_ref() = divisor > 0.0f ? divisor : 1.0f;
-}
-
 /* Hold a finger this long without moving to get a right-click. */
 static constexpr uint64_t TOUCH_LONG_PRESS_MS = 500;
 /* Movement past this (in pixels) makes the press a left-button drag. Sized for a
@@ -141,9 +133,9 @@ void GHOST_SystemAndroid::getMainDisplayDimensions(uint32_t &width, uint32_t &he
 {
   if (app_ && app_->window) {
     /* Report the size Blender renders at, which the render scale may have reduced. */
-    const float divisor = GHOST_android_render_scale_divisor();
-    width = uint32_t(ANativeWindow_getWidth(app_->window) / divisor);
-    height = uint32_t(ANativeWindow_getHeight(app_->window) / divisor);
+    const uint32_t divisor = GHOST_android_render_scale_divisor();
+    width = uint32_t(ANativeWindow_getWidth(app_->window)) / divisor;
+    height = uint32_t(ANativeWindow_getHeight(app_->window)) / divisor;
   }
   else {
     width = height = 0;
@@ -1105,8 +1097,8 @@ uint16_t GHOST_SystemAndroid::getDPIHint()
 {
   /* Blender's desktop workspace needs substantially more logical room than a mobile UI. Do not
    * pass Android's 450-DPI phone density through directly; use the Android Blender profile. */
-  const float divisor = GHOST_android_render_scale_divisor();
-  return uint16_t(std::max(96u, GHOST_android_ui_dpi() / int(divisor)));
+  const uint32_t divisor = GHOST_android_render_scale_divisor();
+  return uint16_t(std::max(96u, GHOST_android_ui_dpi() / divisor));
 }
 
 /* Call a no-arg void method on the BlenderActivity instance. */
@@ -1169,10 +1161,7 @@ extern "C" bool GHOST_android_open_url(const char *url)
 
 GHOST_TSuccess GHOST_SystemAndroid::popupOnScreenKeyboard(GHOST_IWindow * /*window*/)
 {
-  /* The touch overlay (floating ball → pie → board) is the keyboard here; raising the platform IME
-   * on every text-field tap just covers the field with a second keyboard nobody types into. Keep it
-   * down -- the Java showKeyboard path exists and works, but nothing on the device calls it. */
-  return GHOST_kSuccess;
+  return android_call_activity_void(app_, "showKeyboard");
 }
 
 GHOST_TSuccess GHOST_SystemAndroid::hideOnScreenKeyboard(GHOST_IWindow * /*window*/)
