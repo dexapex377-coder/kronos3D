@@ -32,7 +32,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: blender
-          ref: main
+          # Build the branch the workflow was dispatched on. Hardcoding 'main' here
+          # made every beta-5.3 run compile main instead, so a fix pushed to the branch
+          # was silently ignored and the same Kotlin error reappeared unchanged.
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
           lfs: false
 
       - name: Pick the native run to package

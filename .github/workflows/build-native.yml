@@ -21,7 +21,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: blender
-          ref: main
+          # Same reason as build-apk.yml: build what was dispatched, not main.
+          ref: ${{ github.ref_name }}
           lfs: false
 
       - name: Resolve required Git LFS files from the GitHub store
