@@ -1106,7 +1106,10 @@ uint16_t GHOST_SystemAndroid::getDPIHint()
   /* Blender's desktop workspace needs substantially more logical room than a mobile UI. Do not
    * pass Android's 450-DPI phone density through directly; use the Android Blender profile. */
   const float divisor = GHOST_android_render_scale_divisor();
-  return uint16_t(std::max(96u, GHOST_android_ui_dpi() / int(divisor)));
+  /* Truncating the divisor to int made 1.5 behave exactly like 1.0, so the UI
+   * stayed large and got cropped when the reduced framebuffer was scaled back
+   * up. Divide by the real float value to keep the on-screen UI size stable. */
+  return uint16_t(std::max(96u, uint32_t(GHOST_android_ui_dpi() / divisor)));
 }
 
 /* Call a no-arg void method on the BlenderActivity instance. */
